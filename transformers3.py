@@ -37,7 +37,7 @@ def transformer_encoder(x0, head_size, num_heads, ff_dim, dropout=0.1, is_traini
 
 
 def global_pooling(x):
-    return jnp.average(x, axis=(-2, -1)).values
+    return jnp.average(x, axis=(-2, -1))
 
 
 def transformer(x, head_size, num_heads, ff_dim, num_transformer_blocks, mlp_units, dropout=0.1, mlp_dropout=0.2, is_training=True):
@@ -52,24 +52,20 @@ def transformer(x, head_size, num_heads, ff_dim, num_transformer_blocks, mlp_uni
         x = hk.Linear(dim, w_init=initializer)(x)
         x = jnn.gelu(x)
         x = hk.dropout(hk.next_rng_key(), rate=dropout, x=x)
-    outputs = hk.Linear(1, w_init=initializer)(x)
-
-    return outputs
+    return hk.Linear(1, w_init=initializer)(x)
 
 
 def build_forward_fn(head_size, num_heads, ff_dim, num_transformer_blocks, mlp_units, dropout, mlp_dropout):
-    def forward_fn(data: Mapping[str, jnp.ndarray], is_training: bool = True) -> jnp.ndarray:
-        obs = data['obs']
-        return transformer(obs, head_size, num_heads, ff_dim, num_transformer_blocks, mlp_units, dropout=dropout, mlp_dropout=mlp_dropout, is_training=True)
+    def forward_fn(data: jnp.ndarray, is_training: bool = True) -> jnp.ndarray:
+        return transformer(data, head_size, num_heads, ff_dim, num_transformer_blocks, mlp_units, dropout=dropout,
+                           mlp_dropout=mlp_dropout, is_training=True)
 
     return forward_fn
 
 
 @ft.partial(jax.jit, static_argnums=(0, 4))
-def lm_loss_fn(forward_fn, params, rng, data: Mapping[str, jnp.ndarray], is_training: bool = True) -> jnp.ndarray:
-    y_pred = forward_fn(params, rng, data, is_training)
-    y = data['target']
-
+def lm_loss_fn(forward_fn, params, rng, x, y, is_training: bool = True) -> jnp.ndarray:
+    y_pred = forward_fn(params, rng, x, is_training)
     return -jnp.mean((y - y_pred) ** 2, axis=-1)
 
 
@@ -79,17 +75,17 @@ class GradientUpdater:
         self._loss_fn = loss_fn
         self._opt = optimizer
 
-    def init(self, master_rng, data):
+    def init(self, master_rng, x):
         out_rng, init_rng = jax.random.split(master_rng)
-        params = self._net_init(init_rng, data)
+        params = self._net_init(init_rng, x)
         opt_state = self._opt.init(params)
         out = dict(step=jnp.array(0), rng=out_rng, opt_state=opt_state, params=params)
         return out
 
-    def update(self, state: Mapping[str, Any], data: Mapping[str, jnp.ndarray]):
+    def update(self, state: Mapping[str, Any], x: jnp.ndarray, y: jnp.ndarray):
         rng, new_rng = jax.random.split(state['rng'])
         params = state['params']
-        loss, g = jax.value_and_grad(self._loss_fn(params, rng, data))
+        loss, g = jax.value_and_grad(self._loss_fn(params, rng, x, y))
 
         updates, opt_state = self._opt.update(g, state['opt_state'], params)
         params = optax.apply_updates(params, updates)
@@ -128,7 +124,7 @@ def get_generator(x, y, rng_key, batch_size):
         while True:
             key = jax.random.split(key)
             perm = jax.random.choice(rng_key, n, shape=(batch_size,))
-            yield x[perm, :], y[perm]
+            yield jnp.array(x[perm, :]), jnp.array(y[perm])
     return batch_generator()
 
 
@@ -168,12 +164,12 @@ def main():
     rng = jax.random.PRNGKey(888)
     a = next(train_dataset)
     w, z = a
-    state = updater.init(rng, {'obs': w, 'target': z})
+    state = updater.init(rng, w)
 
     logging.info('Starting train loop ++++++++...')
     for i, (w, z) in zip(range(max_steps), train_dataset):
         logging.info(f'Step {i} computing forward-backward pass')
-        state, metrics = updater.update(state, {'obs': w, 'target': z})
+        state, metrics = updater.update(state, w, z)
         logging.info(f'At step {i} the loss is {metrics}')
 
 
