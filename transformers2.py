@@ -59,7 +59,7 @@ class TransformerLayer(hk.Module):
         return output
 
 
-
+class Transformer(hk.Module)
 
 
 
