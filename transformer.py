@@ -1,4 +1,6 @@
 import functools
+import logging
+import time
 from typing import Optional, Mapping, Any
 
 import jax
@@ -7,6 +9,7 @@ import haiku as hk
 import numpy as np
 import jax.nn as jnn
 import optax
+import pandas as pd
 
 
 class SelfAttention(hk.MultiHeadAttention):
@@ -80,7 +83,7 @@ def embeddings(data: Mapping[str, jnp.ndarray], vocab_size: int, d_model: int):
     return input_embeddings, input_mask
 
 
-def build_forward_fn(vocab_size: int, d_model: int, num_heads: int, num_layers: int, dropout_rate:float):
+def build_forward_fn(vocab_size: int, d_model: int, num_heads: int, num_layers: int, dropout_rate: float):
     def forward_fn(data: Mapping[str, jnp.ndarray], is_training: bool = True) -> jnp.ndarray:
         input_embeddings, input_mask = embeddings(data, vocab_size, d_model)
         transformer = Transformer(num_heads=num_heads, num_layers=num_layers, dropout_rate=dropout_rate)
@@ -139,5 +142,71 @@ class GradientUpdater:
         }
 
         return new_state, metrics
+
+
+def load_dataset(filename='./data/sales_train.csv'):
+    train_ds = pd.read_csv(filename)
+
+    monthly_data = train_ds.pivot_table(index=['shop_id', 'item_id'], values=['item_cnt_day'], columns=['date_block_num'], fill_value=0, aggfunc='sum')
+    monthly_data.reset_index(inplace=True)
+    train_data = monthly_data.drop(columns=['shop_id', 'item_id'], level=0)
+    train_data.fillna(0, inplace=True)
+    x_train = np.expand_dims(train_data.values[:, :-1], axis=2)
+    y_train = train_data.values[:, -1:]
+    return jnp.array(x_train), jnp.array(y_train)
+
+
+def get_generator(x, y, rng_key, batch_size):
+    def batch_generator():
+        n = x.shape[0]
+        key = rng_key
+        while True:
+            key = jax.random.split(key)
+            perm = jax.random.choice(rng_key, n, shape=(batch_size,))
+            yield x[perm, :], y[perm]
+    return batch_generator, 128000
+
+
+def main():
+    max_steps = 1000000
+    d_model = 4096
+    num_heads = 8
+    num_layers = 256
+    dropout_rate = 0.5
+    grad_clip_value = 1.0
+    learning_rate = 0.001
+    batch_size = 1024
+    x, y = load_dataset()
+    train_dataset, vocab_size = get_generator(x, y, jax.random.PRNGKey(64444), batch_size)
+
+    forward_fn = build_forward_fn(vocab_size, d_model, num_heads, num_layers, dropout_rate)
+
+    forward_fn = hk.transform(forward_fn)
+    loss_fn = functools.partial(lm_loss_fn, forward_fn.apply, vocab_size)
+
+    optimizer = optax.chain(
+        optax.clip_by_global_norm(grad_clip_value),
+        optax.radam(learning_rate=learning_rate)
+    )
+
+    optimizer_wrapped = optax.lookahead(optimizer, sync_period=8, slow_step_size=0.8, reset_state=False)
+
+    updater = GradientUpdater(forward_fn.init, loss_fn, optimizer_wrapped)
+
+    logging.info('Initializing parameters...')
+    rng = jax.random.PRNGKey(888)
+    w, z = train_dataset()
+    state = updater.init(rng, {'obs': w, 'target': z})
+
+    logging.info('Starting train loop...')
+    prev_time = time.time()
+    for i, (w, z) in zip(range(max_steps), train_dataset()):
+        state, metrics = updater.update(state, {'obs': w, 'target': z})
+        if i % 50 == 0:
+            logging.info(f'At step {i} the loss is {metrics}')
+
+
+if __name__ == "__main__":
+    main()
 
 
