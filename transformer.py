@@ -1,4 +1,4 @@
-from typing import Optional
+from typing import Optional, Mapping
 
 import jax
 import jax.numpy as jnp
@@ -62,4 +62,29 @@ class Transformer(hk.Module):
         h = layer_norm(h, name='ln_f')
 
         return h
+
+
+def embeddings(data: Mapping[str, jnp.ndarray], vocab_size: int, d_model: int):
+    tokens = data['obs']
+    input_mask = jnp.greater(tokens, 0)
+    seq_length = tokens.shape[1]
+
+    # Embed the input tokens and positions
+    embed_init = hk.initializers.TruncatedNormal(stddev=0.02)
+    token_embedding_map = hk.Embed(vocab_size, d_model, w_init=embed_init)
+    token_embs = token_embedding_map(tokens)
+    positional_embeddings = hk.get_parameter('pos_embs', [seq_length, d_model], init=embed_init)
+    input_embeddings = token_embs + positional_embeddings
+    return input_embeddings, input_mask
+
+
+def build_forward_fn(vocab_size: int, d_model: int, num_heads: int, num_layers: int, dropout_rate:float):
+    def forward_fn(data: Mapping[str, jnp.ndarray], is_training: bool = True) -> jnp.ndarray:
+        input_embeddings, input_mask = embeddings(data, vocab_size, d_model)
+        transformer = Transformer(num_heads=num_heads, num_layers=num_layers, dropout_rate=dropout_rate)
+        output_embeddings = transformer(input_embeddings, input_mask, is_training)
+
+        return hk.Linear(vocab_size)(output_embeddings)
+
+    return forward_fn
 
