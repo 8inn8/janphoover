@@ -195,7 +195,8 @@ def main():
 
     logging.info('Initializing parameters...')
     rng = jax.random.PRNGKey(888)
-    w, z = train_dataset()
+    a = train_dataset()
+    w, z = next(a)
     state = updater.init(rng, {'obs': w, 'target': z})
 
     logging.info('Starting train loop...')
