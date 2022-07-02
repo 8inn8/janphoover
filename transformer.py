@@ -43,6 +43,48 @@ def layer_norm(x: jnp.ndarray, name: Optional[str] = None) -> jnp.ndarray:
     return hk.LayerNorm(axis=-1, create_scale=True, create_offset=True, name=name)(x)
 
 
+def input_layer(x, init_scale, dim_val):
+    initializer = hk.initializers.VarianceScaling(init_scale)
+    return hk.Linear(dim_val, w_init=initializer)(x)
+
+
+class PositionalEncoder(hk.Module):
+    def __init__(self, dropout: float = 0.1, max_seq_len: int = 5000, d_model: int = 512):
+        super().__init__()
+        self.d_model = d_model
+        self.max_seq_len = max_seq_len
+        self.dropout = dropout
+
+    def __call__(self, x, is_training: bool = True):
+        add = jnp.squeeze(PositionalEncoder.get_pe(self.max_seq_len, self.d_model)[:x.shape[1], :], axis=1)
+        x = x + add
+        return hk.dropout(hk.next_rng_key(), self.dropout, x)
+
+    @staticmethod
+    def get_pe(max_seq_len, d_model):
+        pe = jnp.zeros(max_seq_len, d_model)
+
+        position = jnp.arange(max_seq_len).unsqueeze(1)
+
+        exp_input = jnp.arange(0, d_model, 2) * (-jnp.log(10000.0) / d_model)
+
+        div_term = jnp.exp(exp_input)  # Returns a new tensor with the exponential of the elements of exp_input
+
+        pe[:, 0::2] = jnp.sin(position * div_term)
+
+        pe[:, 1::2] = jnp.cos(position * div_term)  # torch.Size([target_seq_len, dim_val])
+
+        pe = pe.unsqueeze(0).transpose(0, 1)  # torch.Size([target_seq_len, input_size, dim_val])
+        return pe
+
+
+def positional_encoder(x, d_model, dropout, max_seq_len):
+    return PositionalEncoder(dropout, max_seq_len, d_model)(x)
+
+
+
+
+
 class Transformer(hk.Module):
     def __init__(self, num_heads: int, num_layers: int, dropout_rate: float, name: Optional[str] = None):
         super().__init__(name=name)
@@ -85,22 +127,22 @@ def embeddings(data: Mapping[str, jnp.ndarray], vocab_size: int, d_model: int):
 
 def build_forward_fn(vocab_size: int, d_model: int, num_heads: int, num_layers: int, dropout_rate: float):
     def forward_fn(data: Mapping[str, jnp.ndarray], is_training: bool = True) -> jnp.ndarray:
-        input_embeddings, input_mask = embeddings(data, vocab_size, d_model)
         transformer = Transformer(num_heads=num_heads, num_layers=num_layers, dropout_rate=dropout_rate)
-        output_embeddings = transformer(input_embeddings, input_mask, is_training)
+        output_embeddings = transformer(data['obs'], None, is_training)
 
         return hk.Linear(vocab_size)(output_embeddings)
 
     return forward_fn
 
 
+#@functools.partial(jax.jit, static_argnums=(0, 1, 5))
 def lm_loss_fn(forward_fn, vocab_size: int, params, rng, data: Mapping[str, jnp.ndarray], is_training: bool = True) -> jnp.ndarray:
     logits = forward_fn(params, rng, data, is_training)
-    targets = jnn.one_hot(data['target'], vocab_size)
-    assert logits.shape == targets.shape
+    targets = data['target']
+
 
     mask = jnp.greater(data['obs'], 0)
-    loss = -jnp.sum(targets * jnn.log_softmax(logits), axis=-1)
+    loss = -jnp.sum((targets - logits) ** 2, axis=-1)
     loss = jnp.sum(loss * mask) / jnp.sum(mask)
 
     return loss
@@ -112,7 +154,6 @@ class GradientUpdater:
         self._loss_fn = loss_fn
         self._opt = optimizer
 
-    @functools.partial(jax.jit, static_argnums=0)
     def init(self, master_rng, data):
         out_rng, init_rng = jax.random.split(master_rng)
         params = self._net_init(init_rng, data)
@@ -120,7 +161,6 @@ class GradientUpdater:
         out = dict(step=jnp.array(0), rng=out_rng, opt_state=opt_state, params=params)
         return out
 
-    @functools.partial(jax.jit, static_argnums=0)
     def update(self, state: Mapping[str, Any], data: Mapping[str, jnp.ndarray]):
         rng, new_rng = jax.random.split(state['rng'])
         params = state['params']
@@ -164,25 +204,25 @@ def get_generator(x, y, rng_key, batch_size):
             key = jax.random.split(key)
             perm = jax.random.choice(rng_key, n, shape=(batch_size,))
             yield x[perm, :], y[perm]
-    return batch_generator(), 1048
+    return batch_generator(), 1
 
 
 def main():
     max_steps = 222
-    d_model = 512
-    num_heads = 8
-    num_layers = 256
+    d_model = 128
+    num_heads = 2
+    num_layers = 32
     dropout_rate = 0.5
     grad_clip_value = 1.0
     learning_rate = 0.01
-    batch_size = 138
+    batch_size = 256
     x, y = load_dataset()
     train_dataset, vocab_size = get_generator(x, y, jax.random.PRNGKey(64444), batch_size)
 
     forward_fn = build_forward_fn(vocab_size, d_model, num_heads, num_layers, dropout_rate)
 
     forward_fn = hk.transform(forward_fn)
-    forward_apply = jax.jit(forward_fn.apply)
+    forward_apply = forward_fn.apply #jax.jit(forward_fn.apply)
     loss_fn = functools.partial(lm_loss_fn, forward_apply, vocab_size)
 
     optimizer = optax.chain(
@@ -201,7 +241,6 @@ def main():
     state = updater.init(rng, {'obs': w, 'target': z})
 
     logging.info('Starting train loop...')
-    prev_time = time.time()
     for i, (w, z) in zip(range(max_steps), train_dataset):
         logging.info(f'Step {i} computing forward-backward pass')
         state, metrics = updater.update(state, {'obs': w, 'target': z})
@@ -209,6 +248,7 @@ def main():
 
 
 if __name__ == "__main__":
+    logging.getLogger().setLevel(logging.INFO)
     main()
 
 
