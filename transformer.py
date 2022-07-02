@@ -164,47 +164,48 @@ def get_generator(x, y, rng_key, batch_size):
             key = jax.random.split(key)
             perm = jax.random.choice(rng_key, n, shape=(batch_size,))
             yield x[perm, :], y[perm]
-    return batch_generator, 128000
+    return batch_generator(), 1048
 
 
 def main():
-    max_steps = 1000000
-    d_model = 4096
+    max_steps = 222
+    d_model = 512
     num_heads = 8
     num_layers = 256
     dropout_rate = 0.5
     grad_clip_value = 1.0
-    learning_rate = 0.001
-    batch_size = 1024
+    learning_rate = 0.01
+    batch_size = 138
     x, y = load_dataset()
     train_dataset, vocab_size = get_generator(x, y, jax.random.PRNGKey(64444), batch_size)
 
     forward_fn = build_forward_fn(vocab_size, d_model, num_heads, num_layers, dropout_rate)
 
     forward_fn = hk.transform(forward_fn)
-    loss_fn = functools.partial(lm_loss_fn, forward_fn.apply, vocab_size)
+    forward_apply = jax.jit(forward_fn.apply)
+    loss_fn = functools.partial(lm_loss_fn, forward_apply, vocab_size)
 
     optimizer = optax.chain(
         optax.clip_by_global_norm(grad_clip_value),
         optax.radam(learning_rate=learning_rate)
     )
 
-    optimizer_wrapped = optax.lookahead(optimizer, sync_period=8, slow_step_size=0.8, reset_state=False)
+    #optimizer_wrapped = optax.lookahead(optimizer, sync_period=8, slow_step_size=0.8, reset_state=False)
 
-    updater = GradientUpdater(forward_fn.init, loss_fn, optimizer_wrapped)
+    updater = GradientUpdater(forward_fn.init, loss_fn, optimizer)
 
     logging.info('Initializing parameters...')
     rng = jax.random.PRNGKey(888)
-    a = train_dataset()
-    w, z = next(a)
+    a = next(train_dataset)
+    w, z = a
     state = updater.init(rng, {'obs': w, 'target': z})
 
     logging.info('Starting train loop...')
     prev_time = time.time()
-    for i, (w, z) in zip(range(max_steps), train_dataset()):
+    for i, (w, z) in zip(range(max_steps), train_dataset):
+        logging.info(f'Step {i} computing forward-backward pass')
         state, metrics = updater.update(state, {'obs': w, 'target': z})
-        if i % 50 == 0:
-            logging.info(f'At step {i} the loss is {metrics}')
+        logging.info(f'At step {i} the loss is {metrics}')
 
 
 if __name__ == "__main__":
