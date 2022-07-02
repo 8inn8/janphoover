@@ -1,4 +1,5 @@
 import functools
+from typing import Optional
 
 import jax
 import jax.numpy as jnp
@@ -32,35 +33,56 @@ def create_look_ahead_mask(size):
     return mask
 
 
-def layer_norm(x: jnp.ndarray) -> jnp.ndarray:
-    return hk.LayerNorm(axis=-1, create_scale=True, create_offset=True)(x)
+def layer_norm(x: jnp.ndarray, name: Optional[str] = None) -> jnp.ndarray:
+    return hk.LayerNorm(axis=-1, create_scale=True, create_offset=True, name=name)(x)
 
 class TransformerLayer(hk.Module):
-    def __init__(self, dropout, num_heads, key_size, hidden_mlp_dim, dd):
-        super().__init__()
+    def __init__(self, dd, hh, hidden_mlp_dim, dropout, name):
+        super(TransformerLayer, self).__init__(name)
         self.dropout = dropout
-        self.num_heads = num_heads
-        self.key_size = key_size
+        self.num_heads = hh
+        self.key_size = dd
         self.hidden_mlp_dim = hidden_mlp_dim
-        self.dd = dd
 
     def __call__(self, x, look_ahead_mask, is_training: bool = True):
-
+        dropout = self.dropout if is_training else 0.0
         mha, mha_w = hk.MultiHeadAttention(self.num_heads, self.key_size, w_init_scale=0.02)(x, look_ahead_mask, x)
-        mha = hk.dropout(hk.next_rng_key(), self.dropout, mha)
+        mha = hk.dropout(hk.next_rng_key(), dropout, mha)
         mha = layer_norm(mha + x)
 
         initializer = hk.initializers.VarianceScaling(0.02)
         mlp = jnn.gelu(hk.Linear(self.hidden_mlp_dim, w_init=initializer)(mha_w))
-        mlp = hk.Linear(self.dd, w_init=initializer)(mlp)
-        mlp = hk.dropout(hk.next_rng_key(), self.dropout, mlp)
+        mlp = hk.Linear(self.key_size, w_init=initializer)(mlp)
+        mlp = hk.dropout(hk.next_rng_key(), dropout, mlp)
 
         output = layer_norm(mlp + mha)
         return output
 
 
-class Transformer(hk.Module)
+class Transformer(hk.Module):
+        def __init__(self, num_layers, D, H, hidden_mlp_dim, inp_features, out_features, dropout_rate):
+            super(Transformer, self).__init__()
+            self.sqrt_D = jnp.sqrt(D)
+            self.num_layers = num_layers
+            self.dropout = dropout_rate
+            self.H = H
+            self.D = D
+            self.hidden_mlp = hidden_mlp_dim
+            self.inp_features = inp_features
+            self.out_features = out_features
 
+        def __call__(self, x, mask, is_training: bool=True):
+            B, S, _ = x.shape
+            D, H = self.D, self.H
+            dropout = self.dropout if is_training else 0.0
+            initializer = hk.initializers.VarianceScaling(0.02)
+            x = hk.Linear(D,w_init=initializer, name='inp_linear')(x)
+            x = x * self.sqrt_D
+            x = x + positional_encoding(D)[:, :S, :]
+            x = hk.dropout(hk.next_rng_key(), dropout, x)
 
+            for i in range(self.num_layers):
+                x, _ = TransformerLayer(D, H, self.hidden_mlp, dropout=dropout, name=f'h{i}_mha')(x=x, look_ahead_mask=mask)
+            return layer_norm(hk.Linear(self.out_features, w_init=initializer)(x), name='output_ln')
 
 
