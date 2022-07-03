@@ -131,12 +131,15 @@ class GradientUpdater:
         out = dict(step=jnp.array(0), rng=out_rng, opt_state=opt_state, params=params)
         return out
 
+    @ft.partial(jax.pmap, axis_name='num_devices')
     def update(self, state: Mapping[str, Any], x: jnp.ndarray, y: jnp.ndarray):
         rng, new_rng = jax.random.split(state['rng'])
         params = state['params']
-        loss, g = jax.value_and_grad(self._loss_fn)(params, rng, x, y)
+        loss, grads = jax.value_and_grad(self._loss_fn)(params, rng, x, y)
 
-        updates, opt_state = self._opt.update(g, state['opt_state'], params)
+        grads = jax.lax.pmean(grads, axis_name='num_devices')
+
+        updates, opt_state = self._opt.update(grads, state['opt_state'], params)
         params = optax.apply_updates(params, updates)
 
         new_state = {
@@ -176,6 +179,16 @@ def get_generator(x, y, rng_key, batch_size):
             yield jnp.array(x[perm, :]), jnp.array(y[perm])
     return batch_generator()
 
+def get_generator_parallel(x, y, rng_key, batch_size, num_devices):
+    def batch_generator():
+        n = x.shape[0]
+        key = rng_key
+        while True:
+            key = jax.random.split(key)
+            perm = jax.random.choice(rng_key, n, shape=(batch_size * num_devices,))
+            yield jnp.reshape(x[perm, :], newshape=(num_devices, batch_size, *x.shape[1:])), jnp.reshape(y[perm], newshape=(num_devices, batch_size, *y.shape[1:]))
+    return batch_generator()
+
 
 def map_xy(x, y, half_batch):
     x0 = x[:half_batch, :]
@@ -205,12 +218,12 @@ def main():
     dropout = 0.2
 
     grad_clip_value = 0.2
-    learning_rate = 0.01
+    learning_rate = 0.001
     batch_size = 128
-    half_batch = batch_size // 2
+    num_devices = jax.local_device_count()
 
     x, y = load_dataset()
-    train_dataset = get_generator(x, y, jax.random.PRNGKey(64444), batch_size)
+    train_dataset = get_generator_parallel(x, y, jax.random.PRNGKey(64444), batch_size, num_devices)
 
     forward_fn = build_forward_fn(num_layers, time2vec_dim, num_heads, head_size, dropout=dropout)
 
@@ -221,7 +234,7 @@ def main():
 
     optimizer = optax.chain(
         optax.clip_by_global_norm(grad_clip_value),
-        optax.radam(learning_rate=learning_rate)
+        optax.adam(learning_rate=learning_rate)
     )
 
     #optimizer_wrapped = optax.lookahead(optimizer, sync_period=8, slow_step_size=0.8, reset_state=False)
@@ -233,7 +246,9 @@ def main():
     a = next(train_dataset)
     w, z = a
     #q1, q2 = map_xy(w, z, half_batch)
-    state = updater.init(rng, w)
+    state = updater.init(rng, w[0])
+
+    state['params'] = jax.tree_map(lambda x: jnp.array([x] * num_devices), state['params'])
 
     fn_update = updater.update
 
@@ -245,8 +260,7 @@ def main():
         #x_batched, y_batched = map_xy(w, z, half_batch)
         #jax.pmap(lambda j: h(x_batched[j, :, :], y_batched[j, :]))(xs)
         #state, metrics = jax.pmap(h)(w, z)
-        h = ft.partial(fn_update, state)
-        state, metrics = h(w, z)
+        state, metrics = fn_update(state, w, z)
         logging.info(f'At step {i} the loss is {metrics}')
 
 
