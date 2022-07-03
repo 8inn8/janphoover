@@ -22,7 +22,7 @@ def transformer_encoder(x0, head_size, num_heads, ff_dim, dropout=0.1, is_traini
     out_features = x0.shape[-1]
 
     x = layer_norm(x0, name='enc_ln1')
-    x = hk.MultiHeadAttention(key_size=head_size, num_heads=num_heads, w_init_scale=0.02, name='enc_head')(x, x)
+    x = hk.MultiHeadAttention(num_heads=num_heads, key_size=head_size, w_init_scale=0.02, name='enc_head')(x, x, x)
     x = hk.dropout(hk.next_rng_key(), dropout, x)
     res = x + x0
 
@@ -37,7 +37,7 @@ def transformer_encoder(x0, head_size, num_heads, ff_dim, dropout=0.1, is_traini
 
 
 def global_pooling(x):
-    return jnp.average(x, axis=(-2, -1))
+    return jnp.mean(x, axis=(-2, -1))
 
 
 def transformer(x, head_size, num_heads, ff_dim, num_transformer_blocks, mlp_units, dropout=0.1, mlp_dropout=0.2, is_training=True):
@@ -63,11 +63,11 @@ def build_forward_fn(head_size, num_heads, ff_dim, num_transformer_blocks, mlp_u
     return forward_fn
 
 
-@ft.partial(jax.jit, static_argnums=(0, 4))
+@ft.partial(jax.jit, static_argnums=(0, 5))
 def lm_loss_fn(forward_fn, params, rng, x, y, is_training: bool = True) -> jnp.ndarray:
     y_pred = forward_fn(params, rng, x, is_training)
-    return -jnp.mean((y - y_pred) ** 2, axis=-1)
-
+    loss = -jnp.mean((y - y_pred) ** 2)
+    return loss
 
 class GradientUpdater:
     def __init__(self, net_init, loss_fn, optimizer: optax.GradientTransformation):
@@ -85,7 +85,7 @@ class GradientUpdater:
     def update(self, state: Mapping[str, Any], x: jnp.ndarray, y: jnp.ndarray):
         rng, new_rng = jax.random.split(state['rng'])
         params = state['params']
-        loss, g = jax.value_and_grad(self._loss_fn(params, rng, x, y))
+        loss, g = jax.value_and_grad(self._loss_fn)(params, rng, x, y)
 
         updates, opt_state = self._opt.update(g, state['opt_state'], params)
         params = optax.apply_updates(params, updates)
@@ -129,12 +129,12 @@ def get_generator(x, y, rng_key, batch_size):
 
 
 def main():
-    max_steps = 200
-    head_size = 64
-    num_heads = 4
-    ff_dim = 4
-    num_transformer_blocks = 1
-    mlp_units = 1
+    max_steps = 400
+    head_size = 128
+    num_heads = 8
+    ff_dim = 8
+    num_transformer_blocks = 50
+    mlp_units = [1024, 1024, 512, 512, 256, 256, 128, 128, 64, 64]
     dropout = 0.2
     mlp_dropout = 0.5
 
@@ -148,7 +148,7 @@ def main():
     forward_fn = build_forward_fn(head_size, num_heads, ff_dim, num_transformer_blocks, mlp_units, dropout, mlp_dropout)
 
     forward_fn = hk.transform(forward_fn)
-    forward_apply = jax.jit(forward_fn.apply, static_argnums=3)
+    forward_apply = jax.jit(forward_fn.apply)
     loss_fn = ft.partial(lm_loss_fn, forward_apply)
 
     optimizer = optax.chain(
@@ -156,9 +156,9 @@ def main():
         optax.radam(learning_rate=learning_rate)
     )
 
-    optimizer_wrapped = optax.lookahead(optimizer, sync_period=8, slow_step_size=0.8, reset_state=False)
+    #optimizer_wrapped = optax.lookahead(optimizer, sync_period=8, slow_step_size=0.8, reset_state=False)
 
-    updater = GradientUpdater(forward_fn.init, loss_fn, optimizer_wrapped)
+    updater = GradientUpdater(forward_fn.init, loss_fn, optimizer)
 
     logging.info('Initializing parameters...')
     rng = jax.random.PRNGKey(888)
