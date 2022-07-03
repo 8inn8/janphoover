@@ -1,4 +1,5 @@
 import logging
+import pickle
 from typing import Optional, Mapping, Any
 
 import haiku as hk
@@ -181,17 +182,17 @@ def replicate(t, num_devices):
 
 
 def main():
-    max_steps = 20000
-    num_layers = 16
+    max_steps = 88888
+    num_layers = 64
     head_size = 256
     num_heads = 8
-    time2vec_dim = 8
+    time2vec_dim = 64
     #ff_dim = 4
-    dropout = 0.2
+    dropout = 0.5
 
     grad_clip_value = 1.0
-    learning_rate = 0.01
-    batch_size = 256
+    learning_rate = 0.001
+    batch_size = 16
     num_devices = jax.local_device_count()
 
     x, y = load_dataset()
@@ -206,7 +207,7 @@ def main():
 
     optimizer = optax.chain(
         optax.clip_by_global_norm(grad_clip_value),
-        optax.adam(learning_rate=learning_rate)
+        optax.radam(learning_rate=learning_rate)
     )
 
     updater = GradientUpdater(forward_fn.init, loss_fn, optimizer)
@@ -230,6 +231,8 @@ def main():
         num_steps_replicated, rng_replicated, opt_state_multi_device, params_multi_device, metrics = \
             fn_update(num_steps_replicated, rng_replicated, params_multi_device, opt_state_multi_device, w, z)
         logging.info(f'At step {i} the loss is {metrics}')
+        pickle.dump(params_multi_device, './data/params.pkl')
+        pickle.dump(opt_state_multi_device, './data/opt_state.pkl')
 
 
 if __name__ == "__main__":
