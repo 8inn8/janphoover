@@ -21,11 +21,11 @@ def transformer_encoder(x0, head_size, num_heads, ff_dim, dropout=0.1, is_traini
     dropout = dropout if is_training else 0.0
     out_features = x0.shape[-1]
     initializer = hk.initializers.VarianceScaling(0.02)
-    x = layer_norm(x0[:, :, 1], name='enc_ln1')
-    x = hk.MultiHeadAttention(num_heads=num_heads, key_size=head_size, w_init_scale=0.02, name='enc_head')(x, x, x)
+    x = layer_norm(x0, name='enc_ln1')
+    x = hk.MultiHeadAttention(num_heads=num_heads, key_size=head_size, w_init_scale=1.0, name='enc_head')(x, x, x)
     x = hk.dropout(hk.next_rng_key(), dropout, x)
     ws = x.shape[-1]
-    x0 = hk.Linear(ws, w_init=initializer)(x0[:, :, 1])
+    x0 = hk.Linear(ws, w_init=initializer)(x0)
     res = x + x0
 
     # Feed Forward Part
@@ -187,7 +187,7 @@ def main():
     a = next(train_dataset)
     w, z = a
     q1, q2 = map_xy(w, z, half_batch)
-    state = updater.init(rng, jnp.expand_dims(q1[0], axis=2))
+    state = updater.init(rng, q1[0])
 
     fn_update = updater.update
 
@@ -197,7 +197,7 @@ def main():
         h = ft.partial(fn_update, state)
         xs = jnp.arange(jax.local_device_count())
         x_batched, y_batched = map_xy(w, z, half_batch)
-        jax.pmap(lambda j: h(jnp.expand_dims(x_batched[j, :, :], axis=2), y_batched[j, :]))(xs)
+        jax.pmap(lambda j: h(x_batched[j, :, :], y_batched[j, :]))(xs)
         state, metrics = jax.pmap(h)(w, z)
         logging.info(f'At step {i} the loss is {metrics}')
 
