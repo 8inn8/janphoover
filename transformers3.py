@@ -14,30 +14,34 @@ import pandas as pd
 
 
 def layer_norm(x: jnp.ndarray, name: Optional[str] = None) -> jnp.ndarray:
-    return hk.LayerNorm(axis=-1, create_scale=True, create_offset=True, name=name)(x)
+    return hk.LayerNorm(axis=(-1,), create_scale=True, create_offset=True, name=name)(x)
 
 
 def transformer_encoder(x0, head_size, num_heads, ff_dim, dropout=0.1, is_training=True):
     dropout = dropout if is_training else 0.0
     out_features = x0.shape[-1]
-
-    x = layer_norm(x0, name='enc_ln1')
+    initializer = hk.initializers.VarianceScaling(0.02)
+    x = layer_norm(x0[:, :, 1], name='enc_ln1')
     x = hk.MultiHeadAttention(num_heads=num_heads, key_size=head_size, w_init_scale=0.02, name='enc_head')(x, x, x)
     x = hk.dropout(hk.next_rng_key(), dropout, x)
+    ws = x.shape[-1]
+    x0 = hk.Linear(ws, w_init=initializer)(x0[:, :, 1])
     res = x + x0
 
     # Feed Forward Part
-    initializer = hk.initializers.VarianceScaling(0.02)
     x = layer_norm(res)
     x = hk.Conv1D(output_channels=ff_dim, kernel_shape=1, stride=1, padding='same', w_init=initializer)(x)
     x = jnn.gelu(x)
     x = hk.dropout(hk.next_rng_key(), dropout, x)
     x = hk.Conv1D(output_channels=out_features, kernel_shape=1, stride=1, padding='same', w_init=initializer)(x)
+    x = jnn.gelu(x)
+    res = hk.Conv1D(output_channels=ff_dim, kernel_shape=1, stride=1, padding='same', w_init=initializer)(res)
+    res = hk.Conv1D(output_channels=out_features, kernel_shape=1, stride=1, padding='same', w_init=initializer)(res)
     return x + res
 
 
 def global_pooling(x):
-    return jnp.mean(x, axis=(-2, -1))
+    return jnp.mean(x, axis=(-1,))
 
 
 def transformer(x, head_size, num_heads, ff_dim, num_transformer_blocks, mlp_units, dropout=0.1, mlp_dropout=0.2, is_training=True):
@@ -112,7 +116,7 @@ def load_dataset(filename='./data/sales_train.csv'):
     monthly_data.reset_index(inplace=True)
     train_data = monthly_data.drop(columns=['shop_id', 'item_id'], level=0)
     train_data.fillna(0, inplace=True)
-    x_train = np.expand_dims(train_data.values[:, :-1], axis=2).astype(np.float32)
+    x_train = train_data.values[:, :-1].astype(np.float32)
     y_train = train_data.values[:, -1:].astype(np.float32)
     return jnp.array(x_train), jnp.array(y_train)
 
@@ -127,13 +131,30 @@ def get_generator(x, y, rng_key, batch_size):
             yield jnp.array(x[perm, :]), jnp.array(y[perm])
     return batch_generator()
 
+def map_xy(x, y, half_batch):
+    x0 = x[:half_batch, :]
+    y0 = y[:half_batch]
+    x1 = x[half_batch:, :]
+    y1 = y[half_batch:]
+    # print("Super shape.......", x.shape, x0.shape)
+    xw = jnp.zeros((2, half_batch, x.shape[1]))
+    yz = jnp.zeros((2, half_batch, 1))
+
+
+    xw = xw.at[0, :, :].set(x0)
+    yz = yz.at[0, :].set(y0)
+    xw = xw.at[1, :, :].set(x1)
+    yz = yz.at[1, :].set(y1)
+
+    return xw, yz
+
 
 def main():
-    max_steps = 400
-    head_size = 128
-    num_heads = 8
-    ff_dim = 8
-    num_transformer_blocks = 50
+    max_steps = 20000
+    head_size = 256
+    num_heads = 4
+    ff_dim = 4
+    num_transformer_blocks = 4
     mlp_units = [1024, 1024, 512, 512, 256, 256, 128, 128, 64, 64]
     dropout = 0.2
     mlp_dropout = 0.5
@@ -141,6 +162,7 @@ def main():
     grad_clip_value = 1.0
     learning_rate = 0.01
     batch_size = 256
+    half_batch = batch_size // 2
 
     x, y = load_dataset()
     train_dataset = get_generator(x, y, jax.random.PRNGKey(64444), batch_size)
@@ -164,12 +186,19 @@ def main():
     rng = jax.random.PRNGKey(888)
     a = next(train_dataset)
     w, z = a
-    state = updater.init(rng, w)
+    q1, q2 = map_xy(w, z, half_batch)
+    state = updater.init(rng, jnp.expand_dims(q1[0], axis=2))
+
+    fn_update = updater.update
 
     logging.info('Starting train loop ++++++++...')
     for i, (w, z) in zip(range(max_steps), train_dataset):
         logging.info(f'Step {i} computing forward-backward pass')
-        state, metrics = updater.update(state, w, z)
+        h = ft.partial(fn_update, state)
+        xs = jnp.arange(jax.local_device_count())
+        x_batched, y_batched = map_xy(w, z, half_batch)
+        jax.pmap(lambda j: h(jnp.expand_dims(x_batched[j, :, :], axis=2), y_batched[j, :]))(xs)
+        state, metrics = jax.pmap(h)(w, z)
         logging.info(f'At step {i} the loss is {metrics}')
 
 
