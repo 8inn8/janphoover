@@ -128,33 +128,25 @@ class GradientUpdater:
         out_rng, init_rng = jax.random.split(master_rng)
         params = self._net_init(init_rng, x)
         opt_state = self._opt.init(params)
-        out = dict(step=jnp.array(0), rng=out_rng, opt_state=opt_state, params=params)
-        return out
+        return jnp.array(0), out_rng, params, opt_state
 
-    @ft.partial(jax.pmap, axis_name='num_devices')
-    def update(self, state: Mapping[str, Any], x: jnp.ndarray, y: jnp.ndarray):
-        rng, new_rng = jax.random.split(state['rng'])
-        params = state['params']
+    def update(self, num_steps, rng, params, opt_state, x: jnp.ndarray, y: jnp.ndarray):
+        rng, new_rng = jax.random.split(rng)
+
         loss, grads = jax.value_and_grad(self._loss_fn)(params, rng, x, y)
 
-        grads = jax.lax.pmean(grads, axis_name='num_devices')
+        grads = jax.lax.pmean(grads, 'num_devices')
 
-        updates, opt_state = self._opt.update(grads, state['opt_state'], params)
+        updates, opt_state = self._opt.update(grads, opt_state, params)
+
         params = optax.apply_updates(params, updates)
 
-        new_state = {
-            'step': state['step'] + 1,
-            'rng': new_rng,
-            'opt_state': opt_state,
-            'params': params
-        }
-
         metrics = {
-            'step': state['step'],
+            'step': num_steps,
             'loss': loss,
         }
 
-        return new_state, metrics
+        return num_steps + 1, new_rng, opt_state, params, metrics
 
 
 def load_dataset(filename='./data/sales_train.csv'):
@@ -169,16 +161,6 @@ def load_dataset(filename='./data/sales_train.csv'):
     return jnp.array(x_train), jnp.array(y_train)
 
 
-def get_generator(x, y, rng_key, batch_size):
-    def batch_generator():
-        n = x.shape[0]
-        key = rng_key
-        while True:
-            key = jax.random.split(key)
-            perm = jax.random.choice(rng_key, n, shape=(batch_size,))
-            yield jnp.array(x[perm, :]), jnp.array(y[perm])
-    return batch_generator()
-
 def get_generator_parallel(x, y, rng_key, batch_size, num_devices):
     def batch_generator():
         n = x.shape[0]
@@ -186,40 +168,30 @@ def get_generator_parallel(x, y, rng_key, batch_size, num_devices):
         while True:
             key = jax.random.split(key)
             perm = jax.random.choice(rng_key, n, shape=(batch_size * num_devices,))
-            yield jnp.reshape(x[perm, :], newshape=(num_devices, batch_size, *x.shape[1:])), jnp.reshape(y[perm], newshape=(num_devices, batch_size, *y.shape[1:]))
+            yield x[perm, :].reshape(num_devices, batch_size, *x.shape[1:]), y[perm].reshape(num_devices, batch_size, *y.shape[1:])
     return batch_generator()
 
 
-def map_xy(x, y, half_batch):
-    x0 = x[:half_batch, :]
-    y0 = y[:half_batch]
-    x1 = x[half_batch:, :]
-    y1 = y[half_batch:]
-    # print("Super shape.......", x.shape, x0.shape)
-    xw = jnp.zeros((2, half_batch, x.shape[1]))
-    yz = jnp.zeros((2, half_batch, 1))
+def replicate_tree(t, num_devices):
+    return jax.tree_map(lambda x: jnp.array([x] * num_devices), t)
 
 
-    xw = xw.at[0, :, :].set(x0)
-    yz = yz.at[0, :].set(y0)
-    xw = xw.at[1, :, :].set(x1)
-    yz = yz.at[1, :].set(y1)
-
-    return xw, yz
+def replicate(t, num_devices):
+    return jax.tree_map(lambda x: jnp.stack([x] * num_devices), t)
 
 
 def main():
     max_steps = 20000
-    num_layers = 50
+    num_layers = 16
     head_size = 256
-    num_heads = 4
-    time2vec_dim = 1
+    num_heads = 8
+    time2vec_dim = 8
     #ff_dim = 4
     dropout = 0.2
 
-    grad_clip_value = 0.2
-    learning_rate = 0.001
-    batch_size = 128
+    grad_clip_value = 1.0
+    learning_rate = 0.01
+    batch_size = 256
     num_devices = jax.local_device_count()
 
     x, y = load_dataset()
@@ -237,30 +209,26 @@ def main():
         optax.adam(learning_rate=learning_rate)
     )
 
-    #optimizer_wrapped = optax.lookahead(optimizer, sync_period=8, slow_step_size=0.8, reset_state=False)
-
     updater = GradientUpdater(forward_fn.init, loss_fn, optimizer)
 
     logging.info('Initializing parameters...')
     rng = jax.random.PRNGKey(888)
     a = next(train_dataset)
     w, z = a
-    #q1, q2 = map_xy(w, z, half_batch)
-    state = updater.init(rng, w[0])
+    num_steps, rng, params, opt_state = updater.init(rng, w[0, :, :])
 
-    state['params'] = jax.tree_map(lambda x: jnp.array([x] * num_devices), state['params'])
+    params_multi_device = replicate_tree(params, num_devices)
+    opt_state_multi_device = replicate_tree(opt_state, num_devices)
+    num_steps_replicated = replicate_tree(num_steps, num_devices)
+    rng_replicated = replicate(rng, num_devices)
 
-    fn_update = updater.update
+    fn_update = jax.pmap(updater.update, axis_name='num_devices')
 
     logging.info('Starting train loop ++++++++...')
     for i, (w, z) in zip(range(max_steps), train_dataset):
         logging.info(f'Step {i} computing forward-backward pass')
-
-        #xs = jnp.arange(jax.local_device_count())
-        #x_batched, y_batched = map_xy(w, z, half_batch)
-        #jax.pmap(lambda j: h(x_batched[j, :, :], y_batched[j, :]))(xs)
-        #state, metrics = jax.pmap(h)(w, z)
-        state, metrics = fn_update(state, w, z)
+        num_steps_replicated, rng_replicated, opt_state_multi_device, params_multi_device, metrics = \
+            fn_update(num_steps_replicated, rng_replicated, params_multi_device, opt_state_multi_device, w, z)
         logging.info(f'At step {i} the loss is {metrics}')
 
 
