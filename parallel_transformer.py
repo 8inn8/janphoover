@@ -183,7 +183,7 @@ def replicate(t, num_devices):
 
 def main():
     max_steps = 88888
-    num_layers = 64
+    num_layers = 32
     head_size = 256
     num_heads = 8
     time2vec_dim = 64
@@ -192,7 +192,7 @@ def main():
 
     grad_clip_value = 1.0
     learning_rate = 0.001
-    batch_size = 16
+    batch_size = 32
     num_devices = jax.local_device_count()
 
     x, y = load_dataset()
@@ -231,8 +231,10 @@ def main():
         num_steps_replicated, rng_replicated, opt_state_multi_device, params_multi_device, metrics = \
             fn_update(num_steps_replicated, rng_replicated, params_multi_device, opt_state_multi_device, w, z)
         logging.info(f'At step {i} the loss is {metrics}')
-        pickle.dump(params_multi_device, './data/params.pkl')
-        pickle.dump(opt_state_multi_device, './data/opt_state.pkl')
+        with open('./data/params.pkl', 'wb') as f1:
+            pickle.dump(params_multi_device, f1)
+        with open('./data/opt_state.pkl', 'wb') as f2:
+            pickle.dump(opt_state_multi_device, f2)
 
 
 if __name__ == "__main__":
