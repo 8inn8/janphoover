@@ -182,17 +182,17 @@ def replicate(t, num_devices):
 
 
 def main():
-    max_steps = 88888
-    num_layers = 32
-    head_size = 256
-    num_heads = 8
-    time2vec_dim = 64
+    max_steps = 4000
+    num_layers = 64
+    head_size = 128
+    num_heads = 4
+    time2vec_dim = 16
     #ff_dim = 4
     dropout = 0.5
 
     grad_clip_value = 1.0
     learning_rate = 0.001
-    batch_size = 32
+    batch_size = 256
     num_devices = jax.local_device_count()
 
     x, y = load_dataset()
