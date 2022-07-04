@@ -231,10 +231,13 @@ def main():
         num_steps_replicated, rng_replicated, opt_state_multi_device, params_multi_device, metrics = \
             fn_update(num_steps_replicated, rng_replicated, params_multi_device, opt_state_multi_device, w, z)
         logging.info(f'At step {i} the loss is {metrics}')
-        with open('./data/params.pkl', 'wb') as f1:
-            pickle.dump(params_multi_device, f1)
-        with open('./data/opt_state.pkl', 'wb') as f2:
-            pickle.dump(opt_state_multi_device, f2)
+        if i % 50 == 0:
+            print(f'Saving step{i}......')
+            with open('./data/params.pkl', 'wb') as f1:
+                pickle.dump(params_multi_device, f1)
+            with open('./data/opt_state.pkl', 'wb') as f2:
+                pickle.dump(opt_state_multi_device, f2)
+                print('Saved........')
 
 
 if __name__ == "__main__":
