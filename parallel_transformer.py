@@ -182,7 +182,7 @@ def replicate(t, num_devices):
 
 
 def main():
-    max_steps = 4000
+    max_steps = 6000
     num_layers = 64
     head_size = 128
     num_heads = 4
@@ -191,11 +191,14 @@ def main():
     dropout = 0.5
 
     grad_clip_value = 1.0
-    learning_rate = 0.001
+    learning_rate = 0.0001
     batch_size = 256
     num_devices = jax.local_device_count()
 
     x, y = load_dataset()
+
+    print("Number of examples :::: ", x.shape[0])
+
     train_dataset = get_generator_parallel(x, y, jax.random.PRNGKey(64444), batch_size, num_devices)
 
     forward_fn = build_forward_fn(num_layers, time2vec_dim, num_heads, head_size, dropout=dropout)
