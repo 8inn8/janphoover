@@ -1,5 +1,6 @@
 import logging
 import pickle
+from turtle import forward
 from typing import Optional, Mapping, Any
 
 import haiku as hk
@@ -181,6 +182,29 @@ def replicate(t, num_devices):
     return jax.tree_map(lambda x: jnp.stack([x] * num_devices), t)
 
 
+def compute_test_set():
+    train_ds = pd.read_csv('./data/sales_train.csv')
+    test_ds = pd.read_csv('./data/test.csv')
+
+    monthly_data = train_ds.pivot_table(index = ['shop_id','item_id'], values = ['item_cnt_day'], columns = ['date_block_num'], fill_value = 0, aggfunc='sum')
+
+    monthly_data.reset_index(inplace = True)
+
+    train_data = monthly_data.drop(columns= ['shop_id','item_id'], level=0)
+    train_data.fillna(0,inplace = True)
+
+    x_train = np.expand_dims(train_data.values[:,:-1],axis = 2)
+    y_train = train_data.values[:,-1:]
+
+    test_rows = monthly_data.merge(test_ds, on = ['item_id','shop_id'], how = 'right')
+
+    x_test = test_rows.drop(test_rows.columns[:5], axis=1).drop('ID', axis=1)
+    x_test.fillna(0,inplace = True)
+    x_test = np.expand_dims(x_test,axis = 2)
+    x_test = jnp.array(x_test)
+    return x_test, test_ds
+
+
 def main():
     max_steps = 192000
     num_layers = 16
@@ -207,7 +231,7 @@ def main():
 
     forward_fn = hk.transform(forward_fn)
 
-    forward_apply = jax.jit(forward_fn.apply, static_argnums=3)
+    forward_apply = forward_fn.apply
     loss_fn = ft.partial(lm_loss_fn, forward_apply)
 
     optimizer = optax.chain(
@@ -236,13 +260,22 @@ def main():
         num_steps_replicated, rng_replicated, opt_state_multi_device, params_multi_device, metrics = \
             fn_update(num_steps_replicated, rng_replicated, params_multi_device, opt_state_multi_device, w, z)
         logging.info(f'At step {i} the loss is {metrics}')
+    
+    # Test part of the model
+    params_reduced = jax.device_get(jax.tree_map(lambda x: x[0], params_multi_device)) # Reduce parameters for single device
+    x_test, test_ds = compute_test_set()
+    N = x_test.shape[0]
+    result = np.zeros((N,))
+    rng = jr.PRNGKey(8888)
+    for i in range(N):
         if i % 50 == 0:
-            print(f'Saving step{i}......')
-            with open('./data/params.pkl', 'wb') as f1:
-                pickle.dump(params_multi_device, f1)
-            with open('./data/opt_state.pkl', 'wb') as f2:
-                pickle.dump(opt_state_multi_device, f2)
-                print('Saved........')
+            print('Computing ', i)
+        (rng,) = jr.split(rng, 1)
+        eli = jnp.expand_dims(x_test[i, :], axis=0)
+        result[i] = np.float32(forward_apply(params_reduced, rng, eli, is_training=False)[0])
+        
+    submission = pd.DataFrame({'ID':test_ds['ID'],'item_cnt_month':result.ravel()})
+    submission.to_csv('./data/result_submissions.csv', index=False)
 
 
 if __name__ == "__main__":

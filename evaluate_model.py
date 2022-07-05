@@ -111,8 +111,9 @@ def build_forward_fn(num_layers, time2vec_dim, num_heads, head_size, ff_dim=None
     return forward_fn
 
 
-with open('./data/params.pkl') as fm:
-    params = pickle.load(fm)
+with open('./data/params.pkl', 'rb') as fm:
+    params = jax.device_get(jax.tree_map(lambda x: x[0], pickle.load(fm))) # Reduce parameters for single device
+
 
 train_ds = pd.read_csv('./data/sales_train.csv')
 test_ds = pd.read_csv('./data/test.csv')
@@ -132,6 +133,7 @@ test_rows = monthly_data.merge(test_ds, on = ['item_id','shop_id'], how = 'right
 x_test = test_rows.drop(test_rows.columns[:5], axis=1).drop('ID', axis=1)
 x_test.fillna(0,inplace = True)
 x_test = np.expand_dims(x_test,axis = 2)
+x_test = jnp.array(x_test)
 
 num_layers = 16
 head_size = 64
@@ -140,11 +142,22 @@ time2vec_dim = 8
 
 transformer_network = build_forward_fn(num_layers=num_layers, time2vec_dim=time2vec_dim, num_heads=num_heads, head_size=head_size, dropout=0)
 
-hk_net = hk.without_apply_rng(hk.transform(transformer_network))
-fn = jax.jit(hk_net.apply, static_argnums=2)
+hk_net = hk.transform(transformer_network)
+fn = jax.jit(hk_net.apply, static_argnums=(0,))
+rng = jr.PRNGKey(666)
 
-result = np.array(fn(params, x_test, is_training=False))
+N = x_test.shape[0]
+result = np.zeros((N,))
+
+for i in range(N):
+    if i % 50 == 0:
+        print('Computing ', i)
+    (rng,) = jr.split(rng, 1)
+    eli = x_test[i, :]
+    result[i] = np.float32(fn(params, rng, eli, is_training=False))
 
 result = pd.DataFrame(result)
 result.to_csv('./data/submission.csv', index=True)
 
+
+print(x_test.shape)
