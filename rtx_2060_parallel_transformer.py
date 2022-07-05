@@ -256,10 +256,12 @@ def main():
 
     logging.info('Starting train loop ++++++++...')
     for i, (w, z) in zip(range(max_steps), train_dataset):
-        logging.info(f'Step {i} computing forward-backward pass')
+        if i % 50 == 0:
+            logging.info(f'Step {i} computing forward-backward pass')
         num_steps_replicated, rng_replicated, opt_state_multi_device, params_multi_device, metrics = \
             fn_update(num_steps_replicated, rng_replicated, params_multi_device, opt_state_multi_device, w, z)
-        logging.info(f'At step {i} the loss is {metrics}')
+        if i % 50 == 0:
+            logging.info(f'At step {i} the loss is {metrics}')
     
     # Test part of the model
     forward_apply = jax.jit(forward_apply, static_argnames=['is_training'])
