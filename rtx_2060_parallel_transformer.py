@@ -262,17 +262,20 @@ def main():
         logging.info(f'At step {i} the loss is {metrics}')
     
     # Test part of the model
+    forward_apply = jax.jit(forward_apply, static_argnames=['is_training'])
     params_reduced = jax.device_get(jax.tree_map(lambda x: x[0], params_multi_device)) # Reduce parameters for single device
     x_test, test_ds = compute_test_set()
     N = x_test.shape[0]
     result = np.zeros((N,))
     rng = jr.PRNGKey(8888)
-    for i in range(N):
-        if i % 50 == 0:
-            print('Computing ', i)
+    count = N // 10
+    for i in range(count):
+        if i % 5 == 0:
+            print('Computing ', i * 10)
         (rng,) = jr.split(rng, 1)
-        eli = jnp.expand_dims(x_test[i, :], axis=0)
-        result[i] = np.float32(forward_apply(params_reduced, rng, eli, is_training=False)[0])
+        a, b  = i * 10, (i+1) * 10
+        eli = x_test[a:b, :, :]
+        result[a:b] = np.array(forward_apply(params_reduced, rng, eli, is_training=False)[:, 0])
         
     submission = pd.DataFrame({'ID':test_ds['ID'],'item_cnt_month':result.ravel()})
     submission.to_csv('./data/result_submissions.csv', index=False)
