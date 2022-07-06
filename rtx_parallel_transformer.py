@@ -167,15 +167,14 @@ def load_dataset(filename='./data/sales_train.csv', filename1='./data/test.csv')
     x_train = np.expand_dims(dataset.values[:,:-1],axis = 2)
     y_train = dataset.values[:,-1:]
     
-    #x_mean = x_train.mean(axis=0)
-    #std_dev = x_train.std(axis=0)
+    x_mean = x_train.mean(axis=0)
+    std_dev = x_train.std(axis=0)
 
-    #x_train = (x_train - x_mean) / std_dev
+    x_train = (x_train - x_mean) / std_dev
 
-    #x_test = (np.expand_dims(dataset.values[:,1:],axis = 2) - x_mean) / std_dev
-    x_test = np.expand_dims(dataset.values[:,1:],axis = 2)
+    x_test = (np.expand_dims(dataset.values[:,1:],axis = 2) - x_mean) / std_dev
 
-    return jnp.array(x_train), jnp.array(y_train), x_test, test_data
+    return jnp.array(x_train), jnp.array(y_train), jnp.array(x_test), test_data
 
 
 def get_generator_parallel(x, y, rng_key, batch_size, num_devices):
@@ -199,13 +198,13 @@ def replicate(t, num_devices):
 
 
 def main():
-    max_steps = 16000
+    max_steps = 18800
     num_heads = 4
     head_size = 64
-    num_layers = 4
+    num_layers = 6
     dropout_rate = 0.2
-    grad_clip_value = 1.0
-    learning_rate = 0.0003
+    grad_clip_value = 0.1
+    learning_rate = 0.0001
     time2vec_dim = 33
     batch_size = 1024
     
@@ -230,7 +229,7 @@ def main():
 
     optimizer = optax.chain(
         optax.clip_by_global_norm(grad_clip_value),
-        optax.radam(learning_rate=learning_rate)
+        optax.adam(learning_rate=learning_rate)
     )
 
     updater = GradientUpdater(forward_fn.init, loss_fn, optimizer)
@@ -262,7 +261,7 @@ def main():
     params_reduced = jax.device_get(jax.tree_map(lambda x: x[0], params_multi_device)) # Reduce parameters for single device
     N = x_test.shape[0]
     result = np.zeros((N,))
-    rng = jr.PRNGKey(8888)
+    rng = jax.device_get(jax.tree_map(lambda x: x[0], rng_replicated))
     count = N // 10
     for i in range(count):
         if i % 5 == 0:
