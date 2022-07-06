@@ -151,17 +151,49 @@ class GradientUpdater:
 
         return num_steps + 1, new_rng, opt_state, params, metrics
 
+def get_month(x):
+    import datetime as dt
+    return dt.datetime(x.year, x.month, 1)
 
-def load_dataset(filename='./data/sales_train.csv'):
+def load_dataset(filename='./data/sales_train.csv', filename1='./data/test.csv'):
     train_ds = pd.read_csv(filename)
+    test_ds = pd.read_csv(filename1)
 
-    monthly_data = train_ds.pivot_table(index=['shop_id', 'item_id'], values=['item_cnt_day'], columns=['date_block_num'], fill_value=0, aggfunc='sum')
-    monthly_data.reset_index(inplace=True)
-    train_data = monthly_data.drop(columns=['shop_id', 'item_id'], level=0)
-    train_data.fillna(0, inplace=True)
-    x_train = np.expand_dims(train_data.values[:, :-1], axis=2).astype(np.float32)
-    y_train = train_data.values[:, -1:].astype(np.float32)
-    return jnp.array(x_train), jnp.array(y_train)
+    columns = set(test_ds['item_id'])-set(train_ds['item_id'])
+    test_data = test_ds.copy(deep=True)
+    test=test.drop(['ID'], axis=1)
+    test['shop_item']=test['shop_id'].astype('str')+'_'+test['item_id'].astype('str')
+    test = test.drop(['shop_id', 'item_id'], axis=1)
+
+
+    train=train_ds.drop(['date_block_num','item_price'], axis=1)
+    train['date']=[x.replace('.', '-') for x in train['date']]
+    train['date']=pd.to_datetime(train['date'], format='%d-%m-%Y')
+    train['date']=train['date'].apply(get_month)
+    train=train.groupby(['date', 'shop_id', 'item_id']).agg({'item_cnt_day': 'sum'})
+    train.reset_index(inplace=True)
+    train['shop_item']=train['shop_id'].astype('str')+'_'+train['item_id'].astype('str')
+    train = train.drop(['shop_id', 'item_id'], axis=1)
+
+    data = train.merge(test, how='outer', on='shop_item').fillna(0)
+    data.date[data.date==0]=pd.to_datetime('2015-10-01')
+
+    data = data.pivot_table(index='date', columns='shop_item').item_cnt_day.fillna(0)
+
+    data=data.loc[:,test['shop_item']]
+
+    n_past=1
+    n_future=1
+    trainX=[]
+    trainY=[]
+    testX=[]
+    for i in range(n_past, len(np.array(data)) - n_future +1):
+        trainY.append(np.array(data)[i + n_future - 1:i + n_future])
+        trainX.append(np.array(data)[(i - n_past):i, 0:np.array(data).shape[1]])
+    trainX, trainY = jnp.array(trainX), jnp.array(trainY)
+    test_pr=jnp.array(data.loc['2015-10-01', :]).reshape(1,1,data.shape[1])
+
+    return trainX, trainY, test_pr, test_data
 
 
 def get_generator_parallel(x, y, rng_key, batch_size, num_devices):
@@ -222,7 +254,7 @@ def main():
 
     print("Num devices :::: ", num_devices)
 
-    x, y = load_dataset()
+    x, y,  x_test, test_ds = load_dataset()
 
     print("Number of examples :::: ", x.shape[0])
 
@@ -267,7 +299,6 @@ def main():
     # Test part of the model
     forward_apply = jax.jit(forward_apply, static_argnames=['is_training'])
     params_reduced = jax.device_get(jax.tree_map(lambda x: x[0], params_multi_device)) # Reduce parameters for single device
-    x_test, test_ds = compute_test_set()
     N = x_test.shape[0]
     result = np.zeros((N,))
     rng = jr.PRNGKey(8888)
@@ -280,8 +311,9 @@ def main():
         eli = x_test[a:b, :, :]
         result[a:b] = np.array(forward_apply(params_reduced, rng, eli, is_training=False)[:, 0])
         
-    submission = pd.DataFrame({'ID':test_ds['ID'],'item_cnt_month':result.ravel()})
-    submission.to_csv('./data/result_submissions.csv', index=False)
+    submission = test_ds
+    submission['item_cnt_month'] = result
+    submission[['ID', 'item_cnt_month']].to_csv("./data/submission_last.csv", index=False)
 
 
 if __name__ == "__main__":
