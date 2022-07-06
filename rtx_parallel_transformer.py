@@ -167,13 +167,13 @@ def load_dataset(filename='./data/sales_train.csv', filename1='./data/test.csv')
     x_train = np.expand_dims(dataset.values[:,:-1],axis = 2)
     y_train = dataset.values[:,-1:]
     
-    x_mean = x_train.mean(axis=0)
-    std_dev = x_train.std(axis=0)
+    #x_mean = x_train.mean(axis=0)
+    #std_dev = x_train.std(axis=0)
 
-    x_train = (x_train - x_mean) / std_dev
+    #x_train = (x_train - x_mean) / std_dev
 
-    x_test = (np.expand_dims(dataset.values[:,1:],axis = 2) - x_mean) / std_dev
-
+    #x_test = (np.expand_dims(dataset.values[:,1:],axis = 2) - x_mean) / std_dev
+    x_test = np.expand_dims(dataset.values[:,1:],axis = 2)
 
     return jnp.array(x_train), jnp.array(y_train), x_test, test_data
 
@@ -199,13 +199,13 @@ def replicate(t, num_devices):
 
 
 def main():
-    max_steps = 8000
+    max_steps = 16000
     num_heads = 4
-    head_size = 16
-    num_layers = 8
-    dropout_rate = 0.1
-    grad_clip_value = 0.314
-    learning_rate = 0.0001
+    head_size = 64
+    num_layers = 4
+    dropout_rate = 0.2
+    grad_clip_value = 1.0
+    learning_rate = 0.0003
     time2vec_dim = 33
     batch_size = 1024
     
@@ -218,7 +218,8 @@ def main():
     print("Examples :::: ", x.shape)
     print("Testing Examples :::: ", x_test.shape)
 
-    train_dataset = get_generator_parallel(x, y, jax.random.PRNGKey(644), batch_size, num_devices)
+    rng1, rng = jr.split(jax.random.PRNGKey(644))
+    train_dataset = get_generator_parallel(x, y, rng1, batch_size, num_devices)
 
     forward_fn = build_forward_fn(num_layers, time2vec_dim, num_heads, head_size, dropout=dropout_rate)
 
@@ -235,10 +236,10 @@ def main():
     updater = GradientUpdater(forward_fn.init, loss_fn, optimizer)
 
     logging.info('Initializing parameters...')
-    rng = jax.random.PRNGKey(888)
+    rng1, rng = jr.split(rng)
     a = next(train_dataset)
     w, z = a
-    num_steps, rng, params, opt_state = updater.init(rng, w[0, :, :])
+    num_steps, rng, params, opt_state = updater.init(rng1, w[0, :, :])
 
     params_multi_device = replicate_tree(params, num_devices)
     opt_state_multi_device = replicate_tree(opt_state, num_devices)
