@@ -138,9 +138,9 @@ class GradientUpdater:
 
         loss, grads = jax.value_and_grad(self._loss_fn)(params, rng, x, y)
 
-        grads = jax.lax.pmean(grads, 'num_devices')
+        grads = jax.lax.pmean(grads, axis_name='j')
 
-        updates, opt_state = self._opt.update(grads, opt_state, params)
+        updates, opt_state = self._opt.update(grads, opt_state)
 
         params = optax.apply_updates(params, updates)
 
@@ -201,13 +201,13 @@ def replicate(t, num_devices):
 def main():
     max_steps = 8000
     num_heads = 4
-    head_size = 64
-    num_layers = 64
-    dropout_rate = 0.2
-    grad_clip_value = 0.1
-    learning_rate = 0.001
-    time2vec_dim = 30
-    batch_size = 256
+    head_size = 16
+    num_layers = 8
+    dropout_rate = 0.1
+    grad_clip_value = 0.314
+    learning_rate = 0.0001
+    time2vec_dim = 33
+    batch_size = 1024
     
     num_devices = jax.local_device_count()
 
@@ -245,7 +245,7 @@ def main():
     num_steps_replicated = replicate_tree(num_steps, num_devices)
     rng_replicated = replicate(rng, num_devices)
 
-    fn_update = jax.pmap(updater.update, axis_name='num_devices')
+    fn_update = jax.pmap(updater.update, axis_name='j')
 
     logging.info('Starting train loop ++++++++...')
     for i, (w, z) in zip(range(max_steps), train_dataset):
