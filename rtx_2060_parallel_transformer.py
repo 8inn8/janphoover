@@ -27,7 +27,7 @@ class Time2Vec(hk.Module):
         self.k = kernel_size
 
     def __call__(self, inputs, **kwargs):
-        init = hki.RandomUniform()
+        init = hki.RandomNormal()
         ii1 = inputs.shape[1]
         bias = hk.get_parameter("wb", (ii1,), init=init) * inputs + hk.get_parameter("bb", shape=(ii1,), init=init)
         dp = jnp.dot(inputs, hk.get_parameter("wa", shape=(1, ii1, self.k), init=init)) + hk.get_parameter("ba", shape=(1, ii1, self.k), init=init)
@@ -56,7 +56,7 @@ class AttentionBlock(hk.Module):
         x = hk.dropout(hk.next_rng_key(), self.dropout, x)
         x = layer_norm(x)
 
-        init = hki.VarianceScaling(0.02)
+        init = hki.RandomNormal()
         x = hk.Conv1D(output_channels=self.ff_dim, kernel_shape=1, stride=1, w_init=init)(x)
         x = jnn.gelu(x)
         x = hk.Conv1D(output_channels=out_features, kernel_shape=1, stride=1, w_init=init)(x)
@@ -100,8 +100,9 @@ class Transformer(hk.Module):
         x = jnp.concatenate([inputs, time_embedding], -1)
         for i in range(self.num_layers):
             x = AttentionBlock(self.num_heads, self.head_size, self.ff_dim, self.dropout)(x, is_training)
-        x = einops.rearrange(x, 't c b -> t (c b)')
-        init = hki.VarianceScaling(0.02)
+        #x = einops.rearrange(x, 't c b -> t (c b)')
+        x = jnp.mean(x, axis=-1)
+        init = hki.RandomNormal()
         return hk.Linear(1, w_init=init)(x)
 
 
@@ -116,7 +117,7 @@ def build_forward_fn(num_layers, time2vec_dim, num_heads, head_size, ff_dim=None
 @ft.partial(jax.jit, static_argnums=(0, 5))
 def lm_loss_fn(forward_fn, params, rng, x, y, is_training: bool = True) -> jnp.ndarray:
     y_pred = forward_fn(params, rng, x, is_training)
-    loss = jnp.mean((y - y_pred) ** 2)
+    loss = jnp.sqrt(jnp.mean((y - y_pred) ** 2))
     return loss
 
 
@@ -137,7 +138,7 @@ class GradientUpdater:
 
         loss, grads = jax.value_and_grad(self._loss_fn)(params, rng, x, y)
 
-        grads = jax.lax.pmean(grads, 'num_devices')
+        #grads = jax.lax.pmean(grads, 'num_devices')
 
         updates, opt_state = self._opt.update(grads, opt_state, params)
 
@@ -208,14 +209,14 @@ def compute_test_set():
 def main():
     max_steps = 192000
     num_layers = 16
-    head_size = 64
-    num_heads = 4
-    time2vec_dim = 8
+    head_size = 32
+    num_heads = 8
+    time2vec_dim = 1
     #ff_dim = 4
     dropout = 0.5
 
     grad_clip_value = 1.0
-    learning_rate = 0.01
+    learning_rate = 1e-2
     batch_size = 8
     num_devices = jax.local_device_count()
 
@@ -236,7 +237,7 @@ def main():
 
     optimizer = optax.chain(
         optax.clip_by_global_norm(grad_clip_value),
-        optax.radam(learning_rate=learning_rate)
+        optax.adam(learning_rate=learning_rate)
     )
 
     updater = GradientUpdater(forward_fn.init, loss_fn, optimizer)
