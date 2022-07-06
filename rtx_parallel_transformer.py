@@ -138,7 +138,7 @@ class GradientUpdater:
 
         loss, grads = jax.value_and_grad(self._loss_fn)(params, rng, x, y)
 
-        #grads = jax.lax.pmean(grads, 'num_devices')
+        grads = jax.lax.pmean(grads, 'num_devices')
 
         updates, opt_state = self._opt.update(grads, opt_state, params)
 
@@ -215,7 +215,8 @@ def main():
 
     x, y, x_test, test_ds = load_dataset()
 
-    print("Number of examples :::: ", x.shape[0])
+    print("Examples :::: ", x.shape)
+    print("Testing Examples :::: ", x_test.shape)
 
     train_dataset = get_generator_parallel(x, y, jax.random.PRNGKey(644), batch_size, num_devices)
 
