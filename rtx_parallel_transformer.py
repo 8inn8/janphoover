@@ -194,25 +194,25 @@ def replicate(t, num_devices):
 
 
 def main():
-    max_steps = 222
-    d_model = 128
-    num_heads = 2
+    max_steps = 8000
+    num_heads = 4
     head_size = 64
-    num_layers = 32
-    dropout_rate = 0.5
-    grad_clip_value = 1.0
-    learning_rate = 0.01
+    num_layers = 64
+    dropout_rate = 0.2
+    grad_clip_value = 0.1
+    learning_rate = 0.001
+    time2vec_dim = 30
     batch_size = 256
-    time2vec_dim = 32
+    
     num_devices = jax.local_device_count()
 
     print("Num devices :::: ", num_devices)
 
-    x, y = load_dataset()
+    x, y, x_test, test_ds = load_dataset()
 
     print("Number of examples :::: ", x.shape[0])
 
-    train_dataset = get_generator_parallel(x, y, jax.random.PRNGKey(64444), batch_size, num_devices)
+    train_dataset = get_generator_parallel(x, y, jax.random.PRNGKey(644), batch_size, num_devices)
 
     forward_fn = build_forward_fn(num_layers, time2vec_dim, num_heads, head_size, dropout=dropout_rate)
 
@@ -253,7 +253,6 @@ def main():
     # Test part of the model
     forward_apply = jax.jit(forward_apply, static_argnames=['is_training'])
     params_reduced = jax.device_get(jax.tree_map(lambda x: x[0], params_multi_device)) # Reduce parameters for single device
-    x_test, test_ds = compute_test_set()
     N = x_test.shape[0]
     result = np.zeros((N,))
     rng = jr.PRNGKey(8888)
