@@ -166,8 +166,13 @@ def load_dataset(filename='./data/sales_train.csv', filename1='./data/test.csv')
 
     x_train = np.expand_dims(dataset.values[:,:-1],axis = 2)
     y_train = dataset.values[:,-1:]
+    
+    x_mean = x_train.mean(axis=0)
+    std_dev = x_train.std(axis=0)
 
-    x_test = np.expand_dims(dataset.values[:,1:],axis = 2)
+    x_train = (x_train - x_mean) / std_dev
+
+    x_test = (np.expand_dims(dataset.values[:,1:],axis = 2) - x_mean) / std_dev
 
 
     return jnp.array(x_train), jnp.array(y_train), x_test, test_data
