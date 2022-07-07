@@ -139,8 +139,10 @@ class GradientUpdater:
 
         loss, grads = jax.value_and_grad(self._loss_fn)(params, rng, x, y)
 
+        #loss = jax.lax.pmean(loss, axis_name='j')
+
         grads = jax.lax.pmean(grads, axis_name='j')
-        #params = jax.lax.pmean(params, axis_name='j')
+        params = jax.lax.pmean(params, axis_name='j')
 
         params = jax.tree_map(lambda param, g: param - g * learning_rate, params, grads)
 
@@ -185,7 +187,7 @@ def get_generator_parallel(x, y, rng_key, batch_size, num_devices):
         key = rng_key
         while True:
             key = jax.random.split(key)
-            perm = jax.random.choice(rng_key, n, shape=(batch_size,))
+            perm = jax.random.choice(key, n, shape=(batch_size,))
             k = batch_size // num_devices
             yield x[perm, :].reshape(num_devices, k, *x.shape[1:]), y[perm].reshape(num_devices, k, *y.shape[1:])
     return batch_generator()
@@ -206,7 +208,7 @@ def main():
     num_layers = 1
     dropout_rate = 0.4
     grad_clip_value = 1.0
-    learning_rate = 0.001
+    learning_rate = 0.01
     time2vec_dim = 0
     batch_size = 2048
     
