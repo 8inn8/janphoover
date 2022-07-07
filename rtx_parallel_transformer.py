@@ -67,7 +67,7 @@ class AttentionBlock(hk.Module):
 
 
 class TimeDistributed(hk.Module):
-    def __init__(self, module, batch_first=False):
+    def __init__(self, module, batch_first=True):
         super().__init__()
         self.batch_first = batch_first
         self.module = module
@@ -103,10 +103,10 @@ class Transformer(hk.Module):
         for i in range(self.num_layers):
             x = AttentionBlock(self.num_heads, self.head_size, self.ff_dim, self.dropout)(x, is_training)
         #x = einops.rearrange(x, 't c b -> t (c b)')
-        #x = jnp.mean(x, axis=(-2,-1))
+        x = jnp.mean(x, axis=(-2,-1))
         init = hki.VarianceScaling(0.01)
-        return hk.Linear(1, w_init=init)(x)
-
+        ln1 = hk.Linear(1, w_init=init)(x)
+        return jnn.sigmoid(ln1)
 
 def build_forward_fn(num_layers, time2vec_dim, num_heads, head_size, ff_dim=None, dropout=0.5):
     def forward_fn(x: jnp.ndarray, is_training: bool = True) -> jnp.ndarray:
@@ -134,7 +134,7 @@ class GradientUpdater:
         opt_state = self._opt.init(params)
         return jnp.array(0), out_rng, params, opt_state
 
-    def update(self, num_steps, rng, params, opt_state, x:jnp.ndarray, y: jnp.ndarray, learning_rate: float):
+    def update(self, num_steps, rng, params, opt_state, x:jnp.ndarray, y: jnp.ndarray):
         rng, new_rng = jax.random.split(rng)
 
         loss, grads = jax.value_and_grad(self._loss_fn)(params, rng, x, y)
@@ -143,7 +143,7 @@ class GradientUpdater:
 
         grads = jax.lax.pmean(grads, axis_name='j')
 
-        updates, opt_state = self._opt.update(grads, opt_state)
+        updates, opt_state = self._opt.update(grads, opt_state, params)
 
         params = optax.apply_updates(params, updates)
 
@@ -167,30 +167,36 @@ def load_dataset(filename='./data/sales_train.csv', filename1='./data/test.csv')
     dataset.drop(['shop_id','item_id','ID'],inplace = True, axis = 1)
 
 
-    x_train = dataset.values[:,:-1]
+    x_train = np.expand_dims(dataset.values[:,:-1], axis=2)
     y_train = dataset.values[:,-1:]
+
+    y_mean = np.mean(y_train, axis=0)
+    y_std = np.std(y_train, axis=0)
+
+    y_train = (y_train - y_mean) / y_std
     
     x_mean = x_train.mean(axis=0)
     std_dev = x_train.std(axis=0)
 
     x_train = (x_train - x_mean) / std_dev
 
-    x_test = (dataset.values[:,1:] - x_mean) / std_dev
+    x_test = (np.expand_dims(dataset.values[:,1:], axis=2) - x_mean) / std_dev
 
     max_y = jnp.max(y_train, axis=0)
 
-    return jnp.array(x_train), jnp.array(y_train), jnp.array(x_test), test_data, max_y
+    return jnp.array(x_train), jnp.array(y_train), jnp.array(x_test), test_data, y_mean, y_std, max_y
 
 
 def get_generator_parallel(x, y, rng_key, batch_size, num_devices):
     def batch_generator():
         n = x.shape[0]
         key = rng_key
+        kk = batch_size // num_devices
         while True:
             key = jax.random.split(key)
             perm = jax.random.choice(key, n, shape=(batch_size,))
-            k = batch_size // num_devices
-            yield x[perm, :].reshape(num_devices, k, *x.shape[1:]), y[perm].reshape(num_devices, k, *y.shape[1:])
+            
+            yield x[perm, :].reshape(num_devices, kk, *x.shape[1:]), y[perm].reshape(num_devices, kk, *y.shape[1:])
     return batch_generator()
 
 
@@ -203,27 +209,27 @@ def replicate(t, num_devices):
 
 
 def main():
-    max_steps = 15501
+    max_steps = 13301
     num_heads = 8
     head_size = 128
-    num_layers = 2
-    dropout_rate = 0.4
-    grad_clip_value = 1.0
+    num_layers = 8
+    dropout_rate = 0.2
+    grad_clip_value = 0.1
     learning_rate = 0.001
-    time2vec_dim = 0
-    batch_size = 2048
+    time2vec_dim = 32
+    batch_size = 128
     
     num_devices = jax.local_device_count()
 
     print("Num devices :::: ", num_devices)
 
-    x, y, x_test, test_ds, max_y = load_dataset()
+    x, y, x_test, test_ds, y_mean, y_std, max_y = load_dataset()
 
     print("Examples :::: ", x.shape)
     print("Testing Examples :::: ", x_test.shape)
-    print("Max y cap :::::: ", max_y)
+    print("Max y cap, y_mean, y_std :::::: ", max_y, y_mean, y_std)
 
-    rng1, rng = jr.split(jax.random.PRNGKey(111))
+    rng1, rng = jr.split(jax.random.PRNGKey(0))
     train_dataset = get_generator_parallel(x, y, rng1, batch_size, num_devices)
 
     forward_fn = build_forward_fn(num_layers, time2vec_dim, num_heads, head_size, dropout=dropout_rate)
@@ -234,9 +240,9 @@ def main():
     loss_fn = ft.partial(lm_loss_fn, forward_apply)
 
     optimizer = optax.chain(
-        optax.clip_by_global_norm(grad_clip_value),
-        #optax.sgd(learning_rate=learning_rate, momentum=0.95, nesterov=True)
-        optax.radam(learning_rate=learning_rate)
+        optax.adaptive_grad_clip(grad_clip_value),
+        optax.sgd(learning_rate=learning_rate, momentum=0.95, nesterov=True),
+        #optax.radam(learning_rate=learning_rate)
     )
 
     updater = GradientUpdater(forward_fn.init, loss_fn, optimizer)
@@ -245,14 +251,14 @@ def main():
     rng1, rng = jr.split(rng)
     a = next(train_dataset)
     w, z = a
-    num_steps, rng, params, opt_state = updater.init(rng1, w[0, :, :])
+    num_steps, rng, params, opt_state = updater.init(rng1, w[0, :, :, :])
 
-    params_multi_device = params
+    params_multi_device = replicate_tree(params, num_devices)
     opt_state_multi_device = opt_state
     num_steps_replicated = replicate_tree(num_steps, num_devices)
     rng_replicated = rng
 
-    fn_update = jax.pmap(updater.update, axis_name='j', in_axes=(0, None, None, None, 0, 0), out_axes=(0, None, None, None, 0))
+    fn_update = jax.pmap(updater.update, axis_name='j', in_axes=(0, None, 0, None, 0, 0), out_axes=(0, None, 0, None, 0))
 
     logging.info('Starting train loop ++++++++...')
     for i, (w, z) in zip(range(max_steps), train_dataset):
@@ -266,20 +272,26 @@ def main():
     
     # Test part of the model
     forward_apply = jax.jit(forward_apply, static_argnames=['is_training'])
-    params_reduced = params_multi_device# Reduce parameters for single device
+    params_reduced = jax.device_get(jax.tree_map(lambda x: x[0], params_multi_device))# Reduce parameters for single device
     N = x_test.shape[0]
     result = np.zeros((N,))
     rng = rng_replicated
-    count = N // 100
+    ff = lambda eli, rng: forward_apply(params_reduced, rng, eli, is_training=False)
+    count = N // 64
     for i in range(count):
-        if i % 10 == 0:
-            print('Computing ', i * 100)
+        if i % 200 == 0:
+            print('Computing ', i * 64)
         (rng,) = jr.split(rng, 1)
-        a, b  = i * 100, (i+1) * 100
-        eli = x_test[a:b, :]
-        result[a:b] = np.array(forward_apply(params_reduced, rng, eli, is_training=False)[:, 0])
+        a, b = i * 64, (i + 1) * 64
+        eli = x_test[a:b]
+        result[a:b] = np.array(ff(eli, rng))
+
+    for i in range(count * 64, N):
+        print("Last :::::: ", i)
+        eli = jnp.stack([x_test[i] for i in range(64)], axis=0)
+        result[i] = np.array(ff(eli, rng)[0])
         
-    submission = pd.DataFrame({'ID':test_ds['ID'],'item_cnt_month':result.clip(0, max_y).ravel()})
+    submission = pd.DataFrame({'ID':test_ds['ID'],'item_cnt_month':(y_std * result + y_mean).clip(0, max_y).ravel()})
     submission.to_csv('./data/result_submissions.csv', index=False)
 
 
