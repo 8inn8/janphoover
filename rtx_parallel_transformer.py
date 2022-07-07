@@ -102,11 +102,12 @@ class Transformer(hk.Module):
         x = jnp.concatenate([inputs, time_embedding], -1)
         for i in range(self.num_layers):
             x = AttentionBlock(self.num_heads, self.head_size, self.ff_dim, self.dropout)(x, is_training)
-        #x = einops.rearrange(x, 't c b -> t (c b)')
-        x = jnp.mean(x, axis=(-1))
+        x = einops.rearrange(x, 't c b -> t (c b)')
+        #x = jnp.mean(x, axis=(-1))
         init = hki.VarianceScaling(0.01)
         ln1 = hk.Linear(1, w_init=init)(x)
-        return jnn.sigmoid(ln1)
+        #return jnn.sigmoid(ln1)
+        return ln1
 
 def build_forward_fn(num_layers, time2vec_dim, num_heads, head_size, ff_dim=None, dropout=0.5):
     def forward_fn(x: jnp.ndarray, is_training: bool = True) -> jnp.ndarray:
@@ -209,15 +210,15 @@ def replicate(t, num_devices):
 
 
 def main():
-    max_steps = 13001
-    num_heads = 8
-    head_size = 128
-    num_layers = 8
+    max_steps = 4101
+    num_heads = 4
+    head_size = 64
+    num_layers = 2
     dropout_rate = 0.2
     grad_clip_value = 0.1
-    learning_rate = 0.001
-    time2vec_dim = 32
-    batch_size = 128
+    learning_rate = 0.0003
+    time2vec_dim = 15
+    batch_size = 256
     
     num_devices = jax.local_device_count()
 
@@ -241,8 +242,8 @@ def main():
 
     optimizer = optax.chain(
         optax.adaptive_grad_clip(grad_clip_value),
-        optax.sgd(learning_rate=learning_rate, momentum=0.95, nesterov=True),
-        #optax.radam(learning_rate=learning_rate)
+        #optax.sgd(learning_rate=learning_rate, momentum=0.95, nesterov=True),
+        optax.adam(learning_rate=learning_rate)
     )
 
     updater = GradientUpdater(forward_fn.init, loss_fn, optimizer)
