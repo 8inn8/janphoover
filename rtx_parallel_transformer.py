@@ -103,7 +103,7 @@ class Transformer(hk.Module):
         for i in range(self.num_layers):
             x = AttentionBlock(self.num_heads, self.head_size, self.ff_dim, self.dropout)(x, is_training)
         #x = einops.rearrange(x, 't c b -> t (c b)')
-        x = jnp.mean(x, axis=(-2,-1))
+        x = jnp.mean(x, axis=(-1))
         init = hki.VarianceScaling(0.01)
         ln1 = hk.Linear(1, w_init=init)(x)
         return jnn.sigmoid(ln1)
@@ -209,7 +209,7 @@ def replicate(t, num_devices):
 
 
 def main():
-    max_steps = 13301
+    max_steps = 13001
     num_heads = 8
     head_size = 128
     num_layers = 8
@@ -274,23 +274,19 @@ def main():
     forward_apply = jax.jit(forward_apply, static_argnames=['is_training'])
     params_reduced = jax.device_get(jax.tree_map(lambda x: x[0], params_multi_device))# Reduce parameters for single device
     N = x_test.shape[0]
-    result = np.zeros((N,))
+    result = jnp.zeros((N,))
     rng = rng_replicated
-    ff = lambda eli, rng: forward_apply(params_reduced, rng, eli, is_training=False)
-    count = N // 64
+    count = N // 100
     for i in range(count):
         if i % 200 == 0:
-            print('Computing ', i * 64)
+            print('Computing ', i * 100)
         (rng,) = jr.split(rng, 1)
-        a, b = i * 64, (i + 1) * 64
-        eli = x_test[a:b]
-        result[a:b] = np.array(ff(eli, rng))
+        a, b = i * 100, (i + 1) * 100
+        eli = x_test[a:b, :, :]
+        fa = forward_apply(params_reduced, rng,  eli, is_training=False)
+        result = result.at[a:b].set(fa[:, 0])
 
-    for i in range(count * 64, N):
-        print("Last :::::: ", i)
-        eli = jnp.stack([x_test[i] for i in range(64)], axis=0)
-        result[i] = np.array(ff(eli, rng)[0])
-        
+    result = np.array(result)    
     submission = pd.DataFrame({'ID':test_ds['ID'],'item_cnt_month':(y_std * result + y_mean).clip(0, max_y).ravel()})
     submission.to_csv('./data/result_submissions.csv', index=False)
 
