@@ -98,10 +98,12 @@ class Transformer(hk.Module):
     def __call__(self, inputs, is_training=True):
         time2vec = Time2Vec(kernel_size=self.time2vec_dim)
         time_embedding = TimeDistributed(time2vec)(inputs)
+        print("Embedding shape ::: ", time_embedding.shape)
         x = jnp.concatenate([inputs, time_embedding], -1)
         for i in range(self.num_layers):
             x = AttentionBlock(self.num_heads, self.head_size, self.ff_dim, self.dropout)(x, is_training)
-        x = einops.rearrange(x, 't c b -> t (c b)')
+        #x = einops.rearrange(x, 't c b -> t (c b)')
+        #x = jnp.mean(x, axis=(-2,-1))
         init = hki.VarianceScaling(0.01)
         return hk.Linear(1, w_init=init)(x)
 
@@ -117,8 +119,7 @@ def build_forward_fn(num_layers, time2vec_dim, num_heads, head_size, ff_dim=None
 @ft.partial(jax.jit, static_argnums=(0, 5))
 def lm_loss_fn(forward_fn, params, rng, x, y, is_training: bool = True) -> jnp.ndarray:
     y_pred = forward_fn(params, rng, x, is_training)
-    loss = jnp.sqrt(jnp.mean((y - y_pred) ** 2))
-    return loss
+    return jnp.sqrt(jnp.mean((jnp.square(y - y_pred))))
 
 
 class GradientUpdater:
@@ -133,23 +134,21 @@ class GradientUpdater:
         opt_state = self._opt.init(params)
         return jnp.array(0), out_rng, params, opt_state
 
-    def update(self, num_steps, rng, params, opt_state, x: jnp.ndarray, y: jnp.ndarray):
+    def update(self, num_steps, rng, params, x:jnp.ndarray, y: jnp.ndarray, learning_rate: float):
         rng, new_rng = jax.random.split(rng)
 
         loss, grads = jax.value_and_grad(self._loss_fn)(params, rng, x, y)
 
         grads = jax.lax.pmean(grads, axis_name='j')
 
-        updates, opt_state = self._opt.update(grads, opt_state)
-
-        params = optax.apply_updates(params, updates)
+        params = jax.tree_map(lambda param, g: param - g * learning_rate, params, grads)
 
         metrics = {
             'step': num_steps,
             'loss': loss,
         }
 
-        return num_steps + 1, new_rng, opt_state, params, metrics
+        return num_steps + 1, new_rng, params, metrics
 
 
 def load_dataset(filename='./data/sales_train.csv', filename1='./data/test.csv'):
@@ -164,7 +163,7 @@ def load_dataset(filename='./data/sales_train.csv', filename1='./data/test.csv')
     dataset.drop(['shop_id','item_id','ID'],inplace = True, axis = 1)
 
 
-    x_train = np.expand_dims(dataset.values[:,:-1],axis = 2)
+    x_train = dataset.values[:,:-1]
     y_train = dataset.values[:,-1:]
     
     x_mean = x_train.mean(axis=0)
@@ -172,9 +171,11 @@ def load_dataset(filename='./data/sales_train.csv', filename1='./data/test.csv')
 
     x_train = (x_train - x_mean) / std_dev
 
-    x_test = (np.expand_dims(dataset.values[:,1:],axis = 2) - x_mean) / std_dev
+    x_test = (dataset.values[:,1:] - x_mean) / std_dev
 
-    return jnp.array(x_train), jnp.array(y_train), jnp.array(x_test), test_data
+    max_y = jnp.max(y_train, axis=0)
+
+    return jnp.array(x_train), jnp.array(y_train), jnp.array(x_test), test_data, max_y
 
 
 def get_generator_parallel(x, y, rng_key, batch_size, num_devices):
@@ -183,8 +184,9 @@ def get_generator_parallel(x, y, rng_key, batch_size, num_devices):
         key = rng_key
         while True:
             key = jax.random.split(key)
-            perm = jax.random.choice(rng_key, n, shape=(batch_size * num_devices,))
-            yield x[perm, :].reshape(num_devices, batch_size, *x.shape[1:]), y[perm].reshape(num_devices, batch_size, *y.shape[1:])
+            perm = jax.random.choice(rng_key, n, shape=(batch_size,))
+            k = batch_size // num_devices
+            yield x[perm, :].reshape(num_devices, k, *x.shape[1:]), y[perm].reshape(num_devices, k, *y.shape[1:])
     return batch_generator()
 
 
@@ -197,26 +199,27 @@ def replicate(t, num_devices):
 
 
 def main():
-    max_steps = 6100
+    max_steps = 15501
     num_heads = 8
     head_size = 128
-    num_layers = 2
-    dropout_rate = 0.3
+    num_layers = 1
+    dropout_rate = 0.4
     grad_clip_value = 1.0
     learning_rate = 0.001
-    time2vec_dim = 1
-    batch_size = 2048
+    time2vec_dim = 0
+    batch_size = 1024
     
     num_devices = jax.local_device_count()
 
     print("Num devices :::: ", num_devices)
 
-    x, y, x_test, test_ds = load_dataset()
+    x, y, x_test, test_ds, max_y = load_dataset()
 
     print("Examples :::: ", x.shape)
     print("Testing Examples :::: ", x_test.shape)
+    print("Max y cap :::::: ", max_y)
 
-    rng1, rng = jr.split(jax.random.PRNGKey(69))
+    rng1, rng = jr.split(jax.random.PRNGKey(111))
     train_dataset = get_generator_parallel(x, y, rng1, batch_size, num_devices)
 
     forward_fn = build_forward_fn(num_layers, time2vec_dim, num_heads, head_size, dropout=dropout_rate)
@@ -228,7 +231,8 @@ def main():
 
     optimizer = optax.chain(
         optax.clip_by_global_norm(grad_clip_value),
-        optax.sgd(learning_rate=learning_rate, momentum=0.95, nesterov=True)
+        #optax.sgd(learning_rate=learning_rate, momentum=0.95, nesterov=True)
+        optax.radam(learning_rate=learning_rate)
     )
 
     updater = GradientUpdater(forward_fn.init, loss_fn, optimizer)
@@ -244,14 +248,14 @@ def main():
     num_steps_replicated = replicate_tree(num_steps, num_devices)
     rng_replicated = replicate_tree(rng, num_devices)
 
-    fn_update = jax.pmap(updater.update, axis_name='j')
+    fn_update = jax.pmap(updater.update, axis_name='j', static_broadcasted_argnums=(6,))
 
     logging.info('Starting train loop ++++++++...')
     for i, (w, z) in zip(range(max_steps), train_dataset):
         if i % 100 == 0:
             logging.info(f'Step {i} computing forward-backward pass')
-        num_steps_replicated, rng_replicated, opt_state_multi_device, params_multi_device, metrics = \
-            fn_update(num_steps_replicated, rng_replicated, params_multi_device, opt_state_multi_device, w, z)
+        num_steps_replicated, rng_replicated, params_multi_device, metrics = \
+            fn_update(num_steps_replicated, rng_replicated, params_multi_device, w, z, learning_rate)
 
         if i % 100 == 0:
             logging.info(f'At step {i} the loss is {metrics}')
@@ -262,16 +266,16 @@ def main():
     N = x_test.shape[0]
     result = np.zeros((N,))
     rng = jax.device_get(jax.tree_map(lambda x: x[0], rng_replicated))
-    count = N // 10
+    count = N // 100
     for i in range(count):
-        if i % 50 == 0:
-            print('Computing ', i * 10)
+        if i % 10 == 0:
+            print('Computing ', i * 100)
         (rng,) = jr.split(rng, 1)
-        a, b  = i * 10, (i+1) * 10
-        eli = x_test[a:b, :, :]
+        a, b  = i * 100, (i+1) * 100
+        eli = x_test[a:b, :]
         result[a:b] = np.array(forward_apply(params_reduced, rng, eli, is_training=False)[:, 0])
         
-    submission = pd.DataFrame({'ID':test_ds['ID'],'item_cnt_month':result.clip(0, 20).ravel()})
+    submission = pd.DataFrame({'ID':test_ds['ID'],'item_cnt_month':result.clip(0, max_y).ravel()})
     submission.to_csv('./data/result_submissions.csv', index=False)
 
 
