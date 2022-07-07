@@ -134,7 +134,7 @@ class GradientUpdater:
         opt_state = self._opt.init(params)
         return jnp.array(0), out_rng, params, opt_state
 
-    def update(self, num_steps, rng, params, x:jnp.ndarray, y: jnp.ndarray, learning_rate: float):
+    def update(self, num_steps, rng, params, opt_state, x:jnp.ndarray, y: jnp.ndarray, learning_rate: float):
         rng, new_rng = jax.random.split(rng)
 
         loss, grads = jax.value_and_grad(self._loss_fn)(params, rng, x, y)
@@ -142,16 +142,17 @@ class GradientUpdater:
         #loss = jax.lax.pmean(loss, axis_name='j')
 
         grads = jax.lax.pmean(grads, axis_name='j')
-        params = jax.lax.pmean(params, axis_name='j')
 
-        params = jax.tree_map(lambda param, g: param - g * learning_rate, params, grads)
+        updates, opt_state = self._opt.update(grads, opt_state)
+
+        params = optax.apply_updates(params, updates)
 
         metrics = {
             'step': num_steps,
             'loss': loss,
         }
 
-        return num_steps + 1, new_rng, params, metrics
+        return num_steps + 1, new_rng, params, opt_state, metrics
 
 
 def load_dataset(filename='./data/sales_train.csv', filename1='./data/test.csv'):
@@ -205,10 +206,10 @@ def main():
     max_steps = 15501
     num_heads = 8
     head_size = 128
-    num_layers = 1
+    num_layers = 2
     dropout_rate = 0.4
     grad_clip_value = 1.0
-    learning_rate = 0.01
+    learning_rate = 0.001
     time2vec_dim = 0
     batch_size = 2048
     
@@ -247,28 +248,28 @@ def main():
     num_steps, rng, params, opt_state = updater.init(rng1, w[0, :, :])
 
     params_multi_device = params
-    opt_state_multi_device = replicate_tree(opt_state, num_devices)
+    opt_state_multi_device = opt_state
     num_steps_replicated = replicate_tree(num_steps, num_devices)
     rng_replicated = rng
 
-    fn_update = jax.pmap(updater.update, axis_name='j', in_axes=(0, None, None, 0, 0, None), out_axes=(0, None, None, 0))
+    fn_update = jax.pmap(updater.update, axis_name='j', in_axes=(0, None, None, None, 0, 0), out_axes=(0, None, None, None, 0))
 
     logging.info('Starting train loop ++++++++...')
     for i, (w, z) in zip(range(max_steps), train_dataset):
         if i % 100 == 0:
             logging.info(f'Step {i} computing forward-backward pass')
-        num_steps_replicated, rng_replicated, params_multi_device, metrics = \
-            fn_update(num_steps_replicated, rng_replicated, params_multi_device, w, z, learning_rate)
+        num_steps_replicated, rng_replicated, params_multi_device, opt_state_multi_device, metrics = \
+            fn_update(num_steps_replicated, rng_replicated, params_multi_device, opt_state_multi_device, w, z)
 
         if i % 100 == 0:
             logging.info(f'At step {i} the loss is {metrics}')
     
     # Test part of the model
     forward_apply = jax.jit(forward_apply, static_argnames=['is_training'])
-    params_reduced = jax.device_get(jax.tree_map(lambda x: x[0], params_multi_device)) # Reduce parameters for single device
+    params_reduced = params_multi_device# Reduce parameters for single device
     N = x_test.shape[0]
     result = np.zeros((N,))
-    rng = jax.device_get(jax.tree_map(lambda x: x[0], rng_replicated))
+    rng = rng_replicated
     count = N // 100
     for i in range(count):
         if i % 10 == 0:
