@@ -140,6 +140,7 @@ class GradientUpdater:
         loss, grads = jax.value_and_grad(self._loss_fn)(params, rng, x, y)
 
         grads = jax.lax.pmean(grads, axis_name='j')
+        #params = jax.lax.pmean(params, axis_name='j')
 
         params = jax.tree_map(lambda param, g: param - g * learning_rate, params, grads)
 
@@ -207,7 +208,7 @@ def main():
     grad_clip_value = 1.0
     learning_rate = 0.001
     time2vec_dim = 0
-    batch_size = 1024
+    batch_size = 2048
     
     num_devices = jax.local_device_count()
 
@@ -243,12 +244,12 @@ def main():
     w, z = a
     num_steps, rng, params, opt_state = updater.init(rng1, w[0, :, :])
 
-    params_multi_device = replicate_tree(params, num_devices)
+    params_multi_device = params
     opt_state_multi_device = replicate_tree(opt_state, num_devices)
     num_steps_replicated = replicate_tree(num_steps, num_devices)
-    rng_replicated = replicate_tree(rng, num_devices)
+    rng_replicated = rng
 
-    fn_update = jax.pmap(updater.update, axis_name='j', static_broadcasted_argnums=(6,))
+    fn_update = jax.pmap(updater.update, axis_name='j', in_axes=(0, None, None, 0, 0, None), out_axes=(0, None, None, 0))
 
     logging.info('Starting train loop ++++++++...')
     for i, (w, z) in zip(range(max_steps), train_dataset):
