@@ -1,6 +1,5 @@
 import logging
 import pickle
-from turtle import forward
 from typing import Optional, Mapping, Any
 
 import haiku as hk
@@ -35,7 +34,7 @@ class Time2Vec(hk.Module):
         wgts = jnp.sin(dp)
 
         ret = jnp.concatenate([jnp.expand_dims(bias, -1), wgts], axis=-1)
-        return layer_norm(einops.rearrange(ret, "t b c -> t (b c)"))
+        return einops.rearrange(ret, "t b c -> t (b c)")
 
 
 class AttentionBlock(hk.Module):
@@ -222,7 +221,7 @@ def main():
     dropout_rate = 0.5
     grad_clip_value = 1.0
     learning_rate = 0.002
-    time2vec_dim = 7
+    time2vec_dim = 1
     batch_size = 128
     
     num_devices = jax.local_device_count()
