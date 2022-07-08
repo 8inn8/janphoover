@@ -55,16 +55,21 @@ class AttentionBlock(hk.Module):
         out_features = inputs.shape[-1]
 
         x = hk.MultiHeadAttention(num_heads=self.num_heads, key_size=self.head_size, w_init_scale=1.0)(inputs, inputs, inputs)
+        x = hk.BatchNorm(True, True, decay_rate=0.9, scale_init=hki.Constant(1.0), offset_init=hki.Constant(1e-8))(x, is_training=is_training)
+        x = jnn.swish(x)
         x = hk.dropout(hk.next_rng_key(), dropout, x)
-        x = layer_norm(x)
+        
 
         init = hki.VarianceScaling(1.0, "fan_in", "truncated_normal")
         x = hk.Conv1D(output_channels=self.ff_dim, kernel_shape=1, stride=1, w_init=init)(x)
-        x = jnn.gelu(layer_norm(x))
+        x = hk.BatchNorm(True, True, decay_rate=0.9, scale_init=hki.Constant(1.0), offset_init=hki.Constant(1e-8))(x, is_training=is_training)
+        x = jnn.swish(x)
         x = hk.Conv1D(output_channels=out_features, kernel_shape=1, stride=1, w_init=init)(x)
-        x = hk.dropout(hk.next_rng_key(), dropout, layer_norm(x))
+        x = hk.BatchNorm(True, True, decay_rate=0.9, scale_init=hki.Constant(1.0), offset_init=hki.Constant(1e-8))(x, is_training=is_training)
+        x = jnn.swish(x)
+        x = hk.dropout(hk.next_rng_key(), dropout, x)
 
-        return layer_norm(inputs + x)
+        return hk.BatchNorm(True, True, decay_rate=0.9, scale_init=hki.Constant(1.0), offset_init=hki.Constant(1e-8))(inputs + x, is_training=is_training)
 
 
 class TimeDistributed(hk.Module):
@@ -81,7 +86,6 @@ class TimeDistributed(hk.Module):
         x_reshape = einops.rearrange(x, "b c h -> (b c) h")
 
         y = module(x_reshape)
-
 
         return jnp.where(self.batch_first, jnp.reshape(y, newshape=(x.shape[0], -1, y.shape[-1])), jnp.reshape(y, newshape=(-1, x.shape[1], y.shape[-1])))
 
@@ -111,7 +115,7 @@ class Transformer(hk.Module):
         ln1 = hk.Linear(1, w_init=init)(x)
         #out_normalized = jnn.sigmoid(ln1)
         #return hk.LayerNorm(axis=1, create_scale=True, create_offset=True)(out_normalized)
-        return hk.BatchNorm(True, True, decay_rate=0.95, scale_init=hki.Constant(1.0), offset_init=hki.Constant(1e-8))(ln1, is_training=is_training)
+        return hk.BatchNorm(True, True, decay_rate=0.9, scale_init=hki.Constant(1.0), offset_init=hki.Constant(1e-8))(ln1, is_training=is_training)
 
 def build_forward_fn(num_layers, time2vec_dim, num_heads, head_size, ff_dim=None, dropout=0.5):
     def forward_fn(x: jnp.ndarray, is_training: bool = True) -> jnp.ndarray:
@@ -121,7 +125,7 @@ def build_forward_fn(num_layers, time2vec_dim, num_heads, head_size, ff_dim=None
     return forward_fn
 
 
-@ft.partial(jax.jit, static_argnums=(0, 5))
+@ft.partial(jax.jit, static_argnums=(0, 6))
 def lm_loss_fn(forward_fn, params, state, rng, x, y, is_training: bool = True) -> jnp.ndarray:
     y_pred, state = forward_fn(params, state, rng, x, is_training)
     return jnp.sqrt(jnp.mean((jnp.square(y - y_pred)))), state
@@ -178,7 +182,7 @@ def load_dataset(filename='./data/sales_train.csv', filename1='./data/test.csv')
     y_mean = np.mean(y_train, axis=0)
     y_std = np.std(y_train, axis=0)
 
-    y_train = (y_train - y_mean) / y_std
+    #y_train = (y_train - y_mean) / y_std
     
     x_mean = x_train.mean(axis=0)
     std_dev = x_train.std(axis=0)
@@ -214,13 +218,13 @@ def replicate(t, num_devices):
 
 
 def main():
-    max_steps = 2800
+    max_steps = 1500
     num_heads = 8
     head_size = 128
     num_layers = 4
     dropout_rate = 0.5
     grad_clip_value = 1.0
-    learning_rate = 0.003
+    learning_rate = 0.01
     time2vec_dim = 7
     batch_size = 128
     
