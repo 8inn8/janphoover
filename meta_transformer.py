@@ -101,13 +101,13 @@ class TransformerThunk(hk.Module):
         time_embedding = TimeDistributed(time2vec)(inputs)
 
         x = jnp.concatenate([inputs, time_embedding], axis=-1)
-
+        
         for i in range(self.num_layers):
             x = AttentionBlock(num_heads=self.num_heads, head_size=self.head_size, ff_dim=self.ff_dim, dropout=self.dropout)(x, is_training)
-        #return einops.rearrange(x, 't c b -> t (c b)')
-        output = jnp.mean(x, axis=(1, 2)) # Global average pooling
-        return output
-
+        t = einops.rearrange(x, 't c b -> t (c b)')
+        out = hk.Linear(1, w_init=hki.VarianceScaling(1.0))(t)
+        return hk.get_parameter('scl', shape=(1,), init=hki.Constant(1.0)) * out + hk.get_parameter('offs', shape=(1,), init=hki.Constant(1e-8))
+        #return out
 
 def build_forward_fn(num_layers, time2vec_dim, num_heads, head_size, ff_dim=None, dropout=0.5):
     def forward_fn(x: jnp.ndarray, is_training: bool = True) -> jnp.ndarray:
@@ -118,9 +118,9 @@ def build_forward_fn(num_layers, time2vec_dim, num_heads, head_size, ff_dim=None
         
      
 @ft.partial(jax.jit, static_argnums=(0, 6))
-def lm_loss_fn(forward_fn, params, rng, x, y, is_training: bool = True) -> jnp.ndarray:
-    y_pred = forward_fn(params, rng, x, is_training)
-    return jnp.sqrt(jnp.mean((jnp.square(y - y_pred))))
+def lm_loss_fn(forward_fn, params, state, rng, x, y, is_training: bool = True) -> jnp.ndarray:
+    y_pred, state = forward_fn(params, state, rng, x, is_training)
+    return jnp.sqrt(jnp.mean((jnp.square(y - y_pred)))), state
 
 
 class GradientUpdater:
@@ -131,14 +131,14 @@ class GradientUpdater:
 
     def init(self, master_rng, x):
         out_rng, init_rng = jax.random.split(master_rng)
-        params = self._net_init(init_rng, x)
+        params, state = self._net_init(init_rng, x)
         opt_state = self._opt.init(params)
-        return jnp.array(0), out_rng, params,  opt_state
+        return jnp.array(0), out_rng, params, state, opt_state
 
-    def update(self, num_steps, rng, params, opt_state, x:jnp.ndarray, y: jnp.ndarray):
+    def update(self, num_steps, rng, params, state, opt_state, x:jnp.ndarray, y: jnp.ndarray):
         rng, new_rng = jax.random.split(rng)
 
-        loss, grads = jax.value_and_grad(self._loss_fn, has_aux=True)(params,  rng, x, y)
+        (loss, state), grads = jax.value_and_grad(self._loss_fn, has_aux=True)(params, state, rng, x, y)
 
         #loss = jax.lax.pmean(loss, axis_name='j')
 
@@ -153,7 +153,7 @@ class GradientUpdater:
             'loss': loss,
         }
 
-        return num_steps + 1, new_rng, params, opt_state, metrics
+        return num_steps + 1, new_rng, params, state, opt_state, metrics
 
 
 def load_dataset(filename='./data/sales_train.csv', filename1='./data/test.csv'):
@@ -205,9 +205,9 @@ def replicate_tree(t, num_devices):
 def main():
     max_steps = 2100
     num_heads = 8
-    head_size = 64
+    head_size = 128
     num_layers = 8
-    dropout_rate = 0.5
+    dropout_rate = 0.1
     grad_clip_value = 1.0
     learning_rate = 0.002
     time2vec_dim = 1
@@ -228,7 +228,7 @@ def main():
 
     forward_fn = build_forward_fn(num_layers, time2vec_dim, num_heads, head_size, dropout=dropout_rate)
 
-    forward_fn = hk.transform(forward_fn)
+    forward_fn = hk.transform_with_state(forward_fn)
 
     forward_apply = forward_fn.apply
     loss_fn = ft.partial(lm_loss_fn, forward_apply)
@@ -245,21 +245,22 @@ def main():
     rng1, rng = jr.split(rng)
     a = next(train_dataset)
     w, z = a
-    num_steps, rng, params, opt_state = updater.init(rng1, w[0, :, :, :])
+    num_steps, rng, params, state, opt_state = updater.init(rng1, w[0, :, :, :])
 
     params_multi_device = params
     opt_state_multi_device = opt_state
     num_steps_replicated = replicate_tree(num_steps, num_devices)
     rng_replicated = rng
+    state_multi_device = state
 
-    fn_update = jax.pmap(updater.update, axis_name='j', in_axes=(0, None, None, None, 0, 0), out_axes=(0, None, None, None, None, 0))
+    fn_update = jax.pmap(updater.update, axis_name='j', in_axes=(0, None, None, None, None, 0, 0), out_axes=(0, None, None, None, None, 0))
 
     logging.info('Starting train loop ++++++++...')
     for i, (w, z) in zip(range(max_steps), train_dataset):
         if (i + 1) % 100 == 0:
             logging.info(f'Step {i} computing forward-backward pass')
-        num_steps_replicated, rng_replicated, params_multi_device, opt_state_multi_device, metrics = \
-            fn_update(num_steps_replicated, rng_replicated, params_multi_device, opt_state_multi_device, w, z)
+        num_steps_replicated, rng_replicated, params_multi_device, state_multi_device, opt_state_multi_device, metrics = \
+            fn_update(num_steps_replicated, rng_replicated, params_multi_device, state_multi_device, opt_state_multi_device, w, z)
 
         if (i + 1) % 100 == 0:
             logging.info(f'At step {i} the loss is {metrics}')
@@ -267,7 +268,7 @@ def main():
     # Test part of the model
     forward_apply = jax.jit(forward_apply, static_argnames=['is_training'])
     params_reduced = params_multi_device # Reduce parameters for single device
-    #state_reduced = state_multi_device
+    state_reduced = state_multi_device
     N = x_test.shape[0]
     result = jnp.zeros((N,))
     rng = rng_replicated
@@ -278,7 +279,7 @@ def main():
         (rng,) = jr.split(rng, 1)
         a, b = i * 100, (i + 1) * 100
         eli = x_test[a:b, :, :]
-        fa = forward_apply(params_reduced,  rng,  eli, is_training=False)
+        fa, _ = forward_apply(params_reduced, state_reduced, rng,  eli, is_training=False)
         result = result.at[a:b].set(fa[:, 0])
 
     result = np.array(result)    
