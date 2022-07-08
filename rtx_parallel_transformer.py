@@ -54,15 +54,16 @@ class AttentionBlock(hk.Module):
         out_features = inputs.shape[-1]
 
         x = hk.MultiHeadAttention(num_heads=self.num_heads, key_size=self.head_size, w_init_scale=1.0)(inputs, inputs, inputs)
-        x = jnn.swish(x)
+        x = layer_norm(x)
+        x = jnn.gelu(x)
         x = hk.dropout(hk.next_rng_key(), dropout, x)
         
 
         init = hki.VarianceScaling(1.0, "fan_in", "truncated_normal")
         x = hk.Conv1D(output_channels=self.ff_dim, kernel_shape=1, stride=1, w_init=init)(x)
-        x = jnn.swish(x)
+        x = jnn.gelu(x)
         x = hk.Conv1D(output_channels=out_features, kernel_shape=1, stride=1, w_init=init)(x)
-        x = jnn.swish(x)
+        x = jnn.gelu(x)
         x = hk.dropout(hk.next_rng_key(), dropout, x)
 
         return layer_norm(inputs + x)
@@ -103,15 +104,18 @@ class Transformer(hk.Module):
     
         x = jnp.concatenate([inputs, time_embedding], -1)
         for i in range(self.num_layers):
-            x = AttentionBlock(self.num_heads, self.head_size, self.ff_dim, self.dropout)(x, is_training)
+            x = jnn.gelu(AttentionBlock(self.num_heads, self.head_size, self.ff_dim, self.dropout)(x, is_training))
         x = einops.rearrange(x, 't c b -> t (c b)')
         #x = jnp.mean(x, axis=(-1))
         x = hk.dropout(hk.next_rng_key(), dropout, x)
-        init = hki.VarianceScaling(1.0, "fan_in", "truncated_normal")
-        return hk.Linear(1, w_init=init)(x)
+        init = hki.VarianceScaling(2.0, "fan_avg", "truncated_normal")
+        x = hk.Linear(64, w_init=init)(x)
+        x = jnn.gelu(x)
+        ln1 = hk.Linear(1, w_init=init)(x)
         #out_normalized = jnn.sigmoid(ln1)
         #return hk.LayerNorm(axis=1, create_scale=True, create_offset=True)(out_normalized)
-        #return hk.BatchNorm(True, True, decay_rate=0.9, scale_init=hki.Constant(1.0), offset_init=hki.Constant(1e-8))(ln1, is_training=is_training)
+        #return hk.get_parameter('output_scale', shape=(1,), init=hki.Constant(0.99)) *  ln1 + hk.get_parameter('output_offset', shape=(1,), init=hki.Constant(1e-8))
+        return ln1
 
 def build_forward_fn(num_layers, time2vec_dim, num_heads, head_size, ff_dim=None, dropout=0.5):
     def forward_fn(x: jnp.ndarray, is_training: bool = True) -> jnp.ndarray:
@@ -258,13 +262,13 @@ def main():
     w, z = a
     num_steps, rng, params, state, opt_state = updater.init(rng1, w[0, :, :, :])
 
-    params_multi_device = params
+    params_multi_device = replicate_tree(params, num_devices)
     opt_state_multi_device = opt_state
     num_steps_replicated = replicate_tree(num_steps, num_devices)
     rng_replicated = rng
     state_multi_device = state
 
-    fn_update = jax.pmap(updater.update, axis_name='j', in_axes=(0, None, None, None, None, 0, 0), out_axes=(0, None, None, None, None, 0))
+    fn_update = jax.pmap(updater.update, axis_name='j', in_axes=(0, None, 0, None, None, 0, 0), out_axes=(0, None, 0, None, None, 0))
 
     logging.info('Starting train loop ++++++++...')
     for i, (w, z) in zip(range(max_steps), train_dataset):
@@ -278,7 +282,7 @@ def main():
     
     # Test part of the model
     forward_apply = jax.jit(forward_apply, static_argnames=['is_training'])
-    params_reduced = params_multi_device# Reduce parameters for single device
+    params_reduced = jax.device_get(jax.tree_map(lambda x: x[0], params_multi_device))# Reduce parameters for single device
     state_reduced = state_multi_device
     N = x_test.shape[0]
     result = jnp.zeros((N,))
