@@ -25,7 +25,7 @@ class Time2Vec(hk.Module):
 
     def __call__(self, inputs):
         ii1 = inputs.shape[1]
-        init = hki.RandomUniform(0, 0.01)
+        init = hki.RandomUniform(0, 1.0 / ii1)
         bias = hk.get_parameter('wb', shape=(ii1,), init=init) * inputs + hk.get_parameter('bb', shape=(ii1,), init=init)
         wa = hk.get_parameter('wa', shape=(1, ii1, self.k), init=init)
         ba = hk.get_parameter('ba', shape=(1, ii1, self.k), init=init)
@@ -53,12 +53,15 @@ class AttentionBlock(hk.Module):
         out_features = inputs.shape[-1]
 
         x = hk.MultiHeadAttention(num_heads=self.num_heads, key_size=self.head_size, w_init_scale=1.0)(inputs, inputs, inputs)
+        x = hk.BatchNorm(True, True, decay_rate=0.9, eps=1e-6, scale_init=hki.Constant(1.0), offset_init=hki.Constant(1e-8), axis=(-1,))(x, is_training)
         x = hk.dropout(hk.next_rng_key(), dropout, x)
         x = layer_norm(x)
 
         x = hk.Conv1D(output_channels=self.ff_dim, kernel_shape=1, padding="same")(x)
+        x = hk.BatchNorm(True, True, decay_rate=0.9, eps=1e-6, scale_init=hki.Constant(1.0), offset_init=hki.Constant(1e-8), axis=(-1,))(x, is_training)
         x = jnn.gelu(x)
         x = hk.Conv1D(output_channels=out_features, kernel_shape=1, padding="same")(x)
+        x = hk.BatchNorm(True, True, decay_rate=0.9, eps=1e-6, scale_init=hki.Constant(1.0), offset_init=hki.Constant(1e-8), axis=(-1,))(x, is_training)
         x = hk.dropout(hk.next_rng_key(), dropout, x)
         x = jnn.gelu(x)
 
@@ -105,9 +108,10 @@ class TransformerThunk(hk.Module):
         for i in range(self.num_layers):
             x = AttentionBlock(num_heads=self.num_heads, head_size=self.head_size, ff_dim=self.ff_dim, dropout=self.dropout)(x, is_training)
         t = einops.rearrange(x, 't c b -> t (c b)')
-        out = hk.Linear(1, w_init=hki.VarianceScaling(1.0))(t)
+        out = hk.Linear(1)(t)
+        out = jnn.sigmoid(out)
         return hk.get_parameter('scl', shape=(1,), init=hki.Constant(1.0)) * out + hk.get_parameter('offs', shape=(1,), init=hki.Constant(1e-8))
-        #return out
+
 
 def build_forward_fn(num_layers, time2vec_dim, num_heads, head_size, ff_dim=None, dropout=0.5):
     def forward_fn(x: jnp.ndarray, is_training: bool = True) -> jnp.ndarray:
@@ -204,9 +208,9 @@ def replicate_tree(t, num_devices):
 
 def main():
     max_steps = 2100
-    num_heads = 8
+    num_heads = 4
     head_size = 128
-    num_layers = 8
+    num_layers = 1
     dropout_rate = 0.1
     grad_clip_value = 1.0
     learning_rate = 0.002
