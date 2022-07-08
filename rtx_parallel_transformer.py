@@ -55,21 +55,18 @@ class AttentionBlock(hk.Module):
         out_features = inputs.shape[-1]
 
         x = hk.MultiHeadAttention(num_heads=self.num_heads, key_size=self.head_size, w_init_scale=1.0)(inputs, inputs, inputs)
-        x = hk.BatchNorm(True, True, decay_rate=0.9, scale_init=hki.Constant(1.0), offset_init=hki.Constant(1e-8))(x, is_training=is_training)
         x = jnn.swish(x)
         x = hk.dropout(hk.next_rng_key(), dropout, x)
         
 
         init = hki.VarianceScaling(1.0, "fan_in", "truncated_normal")
         x = hk.Conv1D(output_channels=self.ff_dim, kernel_shape=1, stride=1, w_init=init)(x)
-        x = hk.BatchNorm(True, True, decay_rate=0.9, scale_init=hki.Constant(1.0), offset_init=hki.Constant(1e-8))(x, is_training=is_training)
         x = jnn.swish(x)
         x = hk.Conv1D(output_channels=out_features, kernel_shape=1, stride=1, w_init=init)(x)
-        x = hk.BatchNorm(True, True, decay_rate=0.9, scale_init=hki.Constant(1.0), offset_init=hki.Constant(1e-8))(x, is_training=is_training)
         x = jnn.swish(x)
         x = hk.dropout(hk.next_rng_key(), dropout, x)
 
-        return hk.BatchNorm(True, True, decay_rate=0.9, scale_init=hki.Constant(1.0), offset_init=hki.Constant(1e-8))(inputs + x, is_training=is_training)
+        return layer_norm(inputs + x)
 
 
 class TimeDistributed(hk.Module):
@@ -112,10 +109,10 @@ class Transformer(hk.Module):
         #x = jnp.mean(x, axis=(-1))
         x = hk.dropout(hk.next_rng_key(), dropout, x)
         init = hki.VarianceScaling(1.0, "fan_in", "truncated_normal")
-        ln1 = hk.Linear(1, w_init=init)(x)
+        return hk.Linear(1, w_init=init)(x)
         #out_normalized = jnn.sigmoid(ln1)
         #return hk.LayerNorm(axis=1, create_scale=True, create_offset=True)(out_normalized)
-        return hk.BatchNorm(True, True, decay_rate=0.9, scale_init=hki.Constant(1.0), offset_init=hki.Constant(1e-8))(ln1, is_training=is_training)
+        #return hk.BatchNorm(True, True, decay_rate=0.9, scale_init=hki.Constant(1.0), offset_init=hki.Constant(1e-8))(ln1, is_training=is_training)
 
 def build_forward_fn(num_layers, time2vec_dim, num_heads, head_size, ff_dim=None, dropout=0.5):
     def forward_fn(x: jnp.ndarray, is_training: bool = True) -> jnp.ndarray:
@@ -182,7 +179,7 @@ def load_dataset(filename='./data/sales_train.csv', filename1='./data/test.csv')
     y_mean = np.mean(y_train, axis=0)
     y_std = np.std(y_train, axis=0)
 
-    #y_train = (y_train - y_mean) / y_std
+    y_train = (y_train - y_mean) / y_std
     
     x_mean = x_train.mean(axis=0)
     std_dev = x_train.std(axis=0)
@@ -218,13 +215,13 @@ def replicate(t, num_devices):
 
 
 def main():
-    max_steps = 1500
+    max_steps = 2100
     num_heads = 8
-    head_size = 128
-    num_layers = 4
+    head_size = 64
+    num_layers = 8
     dropout_rate = 0.5
     grad_clip_value = 1.0
-    learning_rate = 0.01
+    learning_rate = 0.002
     time2vec_dim = 7
     batch_size = 128
     
@@ -238,7 +235,7 @@ def main():
     print("Testing Examples :::: ", x_test.shape)
     print("Max y cap, y_mean, y_std :::::: ", max_y, y_mean, y_std)
 
-    rng1, rng = jr.split(jax.random.PRNGKey(0))
+    rng1, rng = jr.split(jax.random.PRNGKey(111))
     train_dataset = get_generator_parallel(x, y, rng1, batch_size, num_devices)
 
     forward_fn = build_forward_fn(num_layers, time2vec_dim, num_heads, head_size, dropout=dropout_rate)
@@ -298,7 +295,7 @@ def main():
         result = result.at[a:b].set(fa[:, 0])
 
     result = np.array(result)    
-    submission = pd.DataFrame({'ID':test_ds['ID'],'item_cnt_month': result.clip(0, max_y).ravel()})
+    submission = pd.DataFrame({'ID':test_ds['ID'],'item_cnt_month': (result * y_std + y_mean).clip(0, y_std ** 2 + y_mean).ravel()})
     submission.to_csv('./data/result_submissions.csv', index=False)
 
 
