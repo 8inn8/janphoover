@@ -15,6 +15,7 @@ import functools as ft
 import numpy as np
 import optax
 import pandas as pd
+import datetime as dt
 
 def layer_norm(x: jnp.ndarray, name: Optional[str] = None) -> jnp.ndarray:
     return hk.LayerNorm(axis=-1, create_scale=True, create_offset=True, eps=1e-6, name=name)(x)
@@ -181,7 +182,7 @@ def load_dataset(filename='./data/sales_train.csv', filename1='./data/test.csv')
     y_mean = np.mean(y_train, axis=0)
     y_std = np.std(y_train, axis=0)
 
-    y_train = (y_train - y_mean) / y_std
+    #y_train = (y_train - y_mean) / y_std
     
     x_mean = x_train.mean(axis=0)
     std_dev = x_train.std(axis=0)
@@ -193,6 +194,56 @@ def load_dataset(filename='./data/sales_train.csv', filename1='./data/test.csv')
     max_y = jnp.max(y_train, axis=0)
 
     return jnp.array(x_train), jnp.array(y_train), jnp.array(x_test), test_data, y_mean, y_std, max_y
+
+
+def load(filename='./data/sales_train.csv', filename1='./data/test.csv'):
+    train = pd.read_csv(filename)
+    test = pd.read_csv(filename1)
+
+    columns = set(test['item_id'])-set(train['item_id'])
+    test_data = test.copy(deep=True)
+    train=train.drop(['date_block_num','item_price'], axis=1)
+    test=test.drop(['ID'], axis=1)
+    def get_month(x):
+        return dt.datetime(x.year, x.month, 1)
+    train['date']=[x.replace('.', '-') for x in train['date']]
+    train['date']=pd.to_datetime(train['date'], format='%d-%m-%Y')
+    train['date']=train['date'].apply(get_month)
+
+    train=train.groupby(['date', 'shop_id', 'item_id']).agg({'item_cnt_day': 'sum'})
+    train.reset_index(inplace=True)
+
+    train['shop_item']=train['shop_id'].astype('str')+'_'+train['item_id'].astype('str')
+    test['shop_item']=test['shop_id'].astype('str')+'_'+test['item_id'].astype('str')
+
+    train = train.drop(['shop_id', 'item_id'], axis=1)
+    test = test.drop(['shop_id', 'item_id'], axis=1)
+    
+    data = train.merge(test, how='outer', on='shop_item').fillna(0)
+
+    data.date[data.date==0]=pd.to_datetime('2015-10-01')
+
+    data = data.pivot_table(index='date', columns='shop_item').item_cnt_day.fillna(0)
+    data=data.loc[:,test['shop_item']]
+    n_past=1
+    n_future=1
+    trainX=[]
+    trainY=[]
+    testX=[]
+    for i in range(n_past, len(np.array(data)) - n_future +1):
+        trainY.append(np.array(data)[i + n_future - 1:i + n_future])
+        trainX.append(np.array(data)[(i - n_past):i, 0:np.array(data).shape[1]])
+    trainX, trainY = np.array(trainX).transpose(2, 0, 1), np.array(trainY).transpose(2, 0, 1)
+
+    mu = np.mean(trainX, axis=0)
+    sigma = np.std(trainX, axis=0)
+    trainX = (trainX - mu) / sigma
+
+    test_pr=(np.array(data.loc['2015-10-01', :]).reshape(1,1,data.shape[1]).transpose((2, 0, 1)) - mu) / sigma
+
+
+    return jnp.array(trainX), jnp.array(trainY), jnp.array(test_pr), test_data
+    
     
 def get_generator_parallel(x, y, rng_key, batch_size, num_devices):
     def batch_generator():
@@ -210,26 +261,25 @@ def replicate_tree(t, num_devices):
     return jax.tree_map(lambda x: jnp.array([x] * num_devices), t)
 
 def main():
-    max_steps = 1900
+    max_steps = 2300
     num_heads = 8
     head_size = 128
     num_layers = 2
     dropout_rate = 0.4
     grad_clip_value = 1.0
-    learning_rate = 0.01
+    learning_rate = 0.0001
     time2vec_dim = 1
-    batch_size = 256
+    batch_size = 128
     
     num_devices = jax.local_device_count()
 
     print("Num devices :::: ", num_devices)
 
-    x, y, x_test, test_ds, y_mean, y_std, max_y = load_dataset()
+    x, y, x_test, test_ds = load()
 
     print("Examples :::: ", x.shape)
     print("Examples :::: ", y.shape)
     print("Testing Examples :::: ", x_test.shape)
-    print("Max y cap, y_mean, y_std :::::: ", max_y, y_mean, y_std)
 
     rng1, rng = jr.split(jax.random.PRNGKey(111))
     train_dataset = get_generator_parallel(x, y, rng1, batch_size, num_devices)
@@ -280,6 +330,7 @@ def main():
     N = x_test.shape[0]
     result = jnp.zeros((N,))
     rng = rng_replicated
+
     count = N // 100
     for i in range(count):
         if i % 200 == 0:
@@ -290,9 +341,10 @@ def main():
         fa, _ = forward_apply(params_reduced, state_reduced, rng,  eli, is_training=False)
         result = result.at[a:b].set(fa[:, 0, 0])
 
-    result = np.array(result)    
-    submission = pd.DataFrame({'ID':test_ds['ID'],'item_cnt_month': (result * y_std + y_mean).clip(0, max_y).ravel()})
-    submission.to_csv('./data/result_submissions.csv', index=False)
+    result = np.array(result)
+
+    test_ds['item_cnt_month'] = result.reshape(y.shape[0]).clip(0, 20)
+    test_ds[['ID', 'item_cnt_month']].to_csv('./data/submission.csv', index=False)
 
 
 if __name__ == "__main__":
