@@ -66,11 +66,11 @@ class AttentionBlock(hk.Module):
 
         x = hk.Conv1D(output_channels=self.ff_dim, kernel_shape=1, padding="same")(x)
         x = hk.BatchNorm(False, False, decay_rate=0.9, eps=1e-6)(x, is_training)
-        x = jnn.gelu(x)
+        x = jnn.gelu(x, approximate=True)
         x = hk.Conv1D(output_channels=out_features, kernel_shape=1, padding="same")(x)
         x = hk.BatchNorm(False, False, decay_rate=0.9, eps=1e-6)(x, is_training)
         x = hk.dropout(hk.next_rng_key(), dropout, x)
-        x = jnn.gelu(x)
+        x = jnn.gelu(x, approximate=True)
 
         return layer_norm(x + inputs)
 
@@ -116,10 +116,11 @@ class TransformerThunk(hk.Module):
         w_init = hki.VarianceScaling(2.0, mode='fan_in', distribution='truncated_normal')
         for i in range(self.num_layers):
             x = AttentionBlock(num_heads=self.num_heads, head_size=self.head_size, ff_dim=self.ff_dim, dropout=self.dropout)(x, is_training)
-        x = jnp.dot(x, hk.get_parameter('wfinal', shape=(x.shape[2], 256), init=w_init)) + hk.get_parameter('biasfinal', shape=(256,), init=hki.Constant(1e-6))
-        x = jnn.gelu(x)
+        x = jnp.mean(x, axis=-1)
+        x = hk.Linear(256, w_init=w_init, b_init=hki.Constant(1e-6))(x)
+        x = jnn.gelu(x, approximate=True)
         x = hk.dropout(hk.next_rng_key(), dropout, x)
-        x = jnp.dot(x, hk.get_parameter('wwfinal', shape=(256, 1), init=w_init)) + hk.get_parameter('bbiasfinal', shape=(1,), init=hki.Constant(1e-8))
+        x = jnn.gelu(hk.Linear(1, w_init=w_init, b_init=hki.Constant(1e-6))(x), approximate=True)
         return x
 
 def build_forward_fn(num_layers, time2vec_dim, num_heads, head_size, ff_dim=None, dropout=0.5):
@@ -206,13 +207,13 @@ def replicate_tree(t, num_devices):
     return jax.tree_map(lambda x: jnp.array([x] * num_devices), t)
 
 def main():
-    max_steps = 200000
+    max_steps = 2400
     num_heads = 8
     head_size = 128
     num_layers = 2
     dropout_rate = 0.4
     grad_clip_value = 1.0
-    learning_rate = 0.001
+    learning_rate = 0.01
     time2vec_dim = 3
     batch_size = 256
     
@@ -284,12 +285,12 @@ def main():
         a, b = i * 100, (i + 1) * 100
         eli = x_test[a:b, :, :]
         fa, _ = forward_apply(params_reduced, state_reduced, rng,  eli, is_training=False)
-        result = result.at[a:b].set(fa[:, 0, 0])
+        result = result.at[a:b].set(fa[:, 0])
 
     result = np.array(result)
 
-    output = pd.DataFrame({'ID': test_ds['ID'], 'item_cnt_month': result.ravel()})
-    output.to_csv('submission1.csv', index=False)
+    output = pd.DataFrame({'ID': test_ds['ID'], 'item_cnt_month': result.clip(0, 20).ravel()})
+    output.to_csv('./data/submission1.csv', index=False)
 
 if __name__ == "__main__":
     logging.getLogger().setLevel(logging.INFO)
