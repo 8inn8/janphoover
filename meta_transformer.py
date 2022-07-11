@@ -16,6 +16,7 @@ import numpy as np
 import optax
 import pandas as pd
 import datetime as dt
+from itertools import product
 
 def layer_norm(x: jnp.ndarray, name: Optional[str] = None) -> jnp.ndarray:
     return hk.LayerNorm(axis=-1, create_scale=True, create_offset=True, eps=1e-6, name=name)(x)
@@ -108,7 +109,7 @@ class TransformerThunk(hk.Module):
 
         x = jnp.concatenate([inputs, time_embedding], axis=-1)
         
-        w_init = hki.VarianceScaling(1.0)
+        w_init = hki.VarianceScaling(2.0, mode='fan_in', distribution='truncated_normal')
         for i in range(self.num_layers):
             x = AttentionBlock(num_heads=self.num_heads, head_size=self.head_size, ff_dim=self.ff_dim, dropout=self.dropout)(x, is_training)
         x = jnp.dot(x, hk.get_parameter('wfinal', shape=(x.shape[2], 256), init=w_init)) + hk.get_parameter('biasfinal', shape=(256,), init=hki.Constant(1e-6))
@@ -164,87 +165,134 @@ class GradientUpdater:
         return num_steps + 1, new_rng, params, state, opt_state, metrics
 
 
-def load_dataset(filename='./data/sales_train.csv', filename1='./data/test.csv'):
-    sales_data = pd.read_csv(filename)
-    test_data = pd.read_csv(filename1)
-
-    sales_data['date'] = pd.to_datetime(sales_data['date'],format = '%d.%m.%Y')
-    dataset = sales_data.pivot_table(index = ['shop_id','item_id'], values = ['item_cnt_day'],columns = ['date_block_num'],fill_value = 0,aggfunc='sum')
-    dataset.reset_index(inplace = True)
-    dataset = pd.merge(test_data,dataset,on = ['item_id','shop_id'],how = 'left')
-    dataset.fillna(0,inplace = True)
-    dataset.drop(['shop_id','item_id','ID'],inplace = True, axis = 1)
-
-
-    x_train = np.expand_dims(dataset.values[:,:-1], axis=2)
-    y_train = np.expand_dims(dataset.values[:,-1:], axis=2)
-
-    y_mean = np.mean(y_train, axis=0)
-    y_std = np.std(y_train, axis=0)
-
-    #y_train = (y_train - y_mean) / y_std
-    
-    x_mean = x_train.mean(axis=0)
-    std_dev = x_train.std(axis=0)
-
-    x_train = (x_train - x_mean) / std_dev
-
-    x_test = (np.expand_dims(dataset.values[:,1:], axis=2) - x_mean) / std_dev
-
-    max_y = jnp.max(y_train, axis=0)
-
-    return jnp.array(x_train), jnp.array(y_train), jnp.array(x_test), test_data, y_mean, y_std, max_y
-
-
-def load(filename='./data/sales_train.csv', filename1='./data/test.csv'):
+def load_dataset(filename='./data/sales_train.csv', filename1='./data/test.csv',
+        filename2='./data/shops.csv', filename3='./data/items.csv', filename4='./data/item_categories.csv'):
     train = pd.read_csv(filename)
     test = pd.read_csv(filename1)
 
-    columns = set(test['item_id'])-set(train['item_id'])
-    test_data = test.copy(deep=True)
-    train=train.drop(['date_block_num','item_price'], axis=1)
-    test=test.drop(['ID'], axis=1)
-    def get_month(x):
-        return dt.datetime(x.year, x.month, 1)
-    train['date']=[x.replace('.', '-') for x in train['date']]
-    train['date']=pd.to_datetime(train['date'], format='%d-%m-%Y')
-    train['date']=train['date'].apply(get_month)
+    shops = pd.read_csv(filename2)
+    items = pd.read_csv(filename3)
+    cats = pd.read_csv(filename4)
 
-    train=train.groupby(['date', 'shop_id', 'item_id']).agg({'item_cnt_day': 'sum'})
-    train.reset_index(inplace=True)
+    matrix = []
+    cols = ["date_block_num", "shop_id", "item_id"]
+    for i in range(34):
+        sales = train[train.date_block_num == i]
+        matrix.append(np.array(list(product( [i], sales.shop_id.unique(), sales.item_id.unique()))))
+    matrix = pd.DataFrame(np.vstack(matrix), columns=cols)
+    matrix['date_block_num']=matrix['date_block_num'].astype(int)
+    matrix['shop_id']=matrix['shop_id'].astype(int)
+    matrix['item_id']=matrix['item_id'].astype(int)
+    matrix.sort_values(cols,inplace=True)
 
-    train['shop_item']=train['shop_id'].astype('str')+'_'+train['item_id'].astype('str')
-    test['shop_item']=test['shop_id'].astype('str')+'_'+test['item_id'].astype('str')
+    train['revenue']=train['item_cnt_day']*train['item_price']
 
-    train = train.drop(['shop_id', 'item_id'], axis=1)
-    test = test.drop(['shop_id', 'item_id'], axis=1)
-    
-    data = train.merge(test, how='outer', on='shop_item').fillna(0)
+    group=train.groupby(cols).agg({'item_cnt_day':['sum']})
+    group.columns=['item_cnt_month']
+    group.reset_index(inplace=True)
+    matrix=pd.merge(matrix,group,on=cols,how='left')
+    matrix['item_cnt_month']=matrix['item_cnt_month'].fillna(0).astype(np.float32)
 
-    data.date[data.date==0]=pd.to_datetime('2015-10-01')
+    test['date_block_num']=34
+    test["date_block_num"] = test["date_block_num"].astype(int)
+    test['shop_id']=test['shop_id'].astype(int)
+    test['item_id']=test['item_id'].astype(int)
+    test.drop('ID',inplace=True,axis=1)
+    matrix=pd.concat([matrix,test],ignore_index=True,sort=False,keys=cols)
+    matrix.fillna(0,inplace=True)    
 
-    data = data.pivot_table(index='date', columns='shop_item').item_cnt_day.fillna(0)
-    data=data.loc[:,test['shop_item']]
-    n_past=1
-    n_future=1
-    trainX=[]
-    trainY=[]
-    testX=[]
-    for i in range(n_past, len(np.array(data)) - n_future +1):
-        trainY.append(np.array(data)[i + n_future - 1:i + n_future])
-        trainX.append(np.array(data)[(i - n_past):i, 0:np.array(data).shape[1]])
-    trainX, trainY = np.array(trainX).transpose(2, 0, 1), np.array(trainY).transpose(2, 0, 1)
+    matrix=pd.merge(matrix,shops,on=['shop_id'],how='left')
+    matrix=pd.merge(matrix,items,on='item_id',how='left')
+    matrix=pd.merge(matrix,cats,on='item_category_id',how='left')
 
-    mu = np.mean(trainX, axis=0)
-    sigma = np.std(trainX, axis=0)
-    trainX = (trainX - mu) / sigma
+    matrix["city"] = matrix["city"].astype(np.int8)
+    matrix["category"] = matrix["category"].astype(np.int8)
+    matrix["item_category_id"] = matrix["item_category_id"].astype(np.int8)
+    matrix["sub_type_code"] = matrix["sub_type_code"].astype(np.int8)
+    matrix["name2"] = matrix["name2"].astype(np.int8)
+    matrix["name3"] = matrix["name3"].astype(np.int16)
+    matrix["type_code"] = matrix["type_code"].astype(np.int8)
 
-    test_pr=(np.array(data.loc['2015-10-01', :]).reshape(1,1,data.shape[1]).transpose((2, 0, 1)) - mu) / sigma
+    def lag_feature(df,lags,cols ):
+        for col in cols:
+            print('Adding lag feature in ',col)
+            tmp=df[['date_block_num','shop_id','item_id',col]]
+            for i in lags:
+                shifted=tmp.copy()
+                shifted.columns=['date_block_num','shop_id','item_id',col+'_shifted_'+str(i)]
+                shifted.date_block_num=shifted.date_block_num+i
+                df=pd.merge(df,shifted,on=['date_block_num','shop_id','item_id'],how='left')
+        return df
+
+    matrix=lag_feature(matrix,[1,2,3],["item_cnt_month"])
+
+    group=matrix.groupby(['date_block_num','item_category_id']).agg({'item_cnt_month':['mean']})
+    group.columns=['date_item_cat_avg']
+    group.reset_index(inplace=True)
+    matrix=pd.merge(matrix,group,on=['date_block_num','item_category_id'],how='left')
+    matrix['date_item_cat_avg']=matrix['date_item_cat_avg'].astype(np.float32)
+    matrix=lag_feature(matrix,[1,2],['date_item_cat_avg'])
+    matrix.drop(['date_item_cat_avg'],axis=1,inplace=True)
+
+    group=matrix.groupby(['date_block_num','category']).agg({'item_cnt_month':['mean']})
+    group.columns=['date_cat_avg']
+    group.reset_index(inplace=True)
+
+    matrix=pd.merge(matrix,group,on=['date_block_num','category'],how='left')
+    matrix['date_cat_avg']=matrix['date_cat_avg'].astype(np.float32)
+
+    matrix=lag_feature(matrix,[1,2],['date_cat_avg'])
+    matrix.drop(['date_cat_avg'],axis=1,inplace=True)
+
+    group=matrix.groupby(['date_block_num']).agg({'item_cnt_month':['mean']})
+    group.columns=['date_avg_item_cnt']
+    group.reset_index(inplace=True)
+
+    matrix=pd.merge(matrix,group,on='date_block_num',how='left')
+    matrix.date_avg_item_cnt = matrix["date_avg_item_cnt"].astype(np.float32)
+    matrix=lag_feature(matrix,[1,2],["date_avg_item_cnt"])
+    matrix.drop(['date_avg_item_cnt'],inplace=True,axis=1)
+
+    group=matrix.groupby(['date_block_num','item_id']).agg({'item_cnt_month':['mean']})
+    group.columns=['date_item_avg_item_cnt']
+    group.reset_index(inplace=True)
+
+    matrix=pd.merge(matrix,group,on=['date_block_num','item_id'],how='left')
+    matrix.date_item_avg_item_cnt=matrix['date_item_avg_item_cnt'].astype(np.float32)
+    matrix=lag_feature(matrix,[1,2,3],['date_item_avg_item_cnt'])
+    matrix.drop(['date_item_avg_item_cnt'],inplace=True,axis=1)
+
+    group=train.groupby(['item_id']).agg({'item_price':['mean']})
+    group.columns=['item_id_price_avg']
+    group.reset_index(inplace=True)
+
+    matrix=pd.merge(matrix,group,on=['item_id'],how='left')
+    matrix['item_id_price_avg']=matrix['item_id_price_avg'].astype(np.float32)
+
+    group=train.groupby(['date_block_num','item_id']).agg({'item_price':['mean']})
+    group.columns=['date_item_id_price_avg']
+    group.reset_index(inplace=True)
+
+    matrix=pd.merge(matrix,group,on=['date_block_num','item_id'],how='left')
+    matrix['date_item_id_price_avg']=matrix['date_item_id_price_avg'].astype(np.float32)
+
+    matrix=lag_feature(matrix,[1,2,3],['date_item_id_price_avg'])
+
+    for i in [1,2,3]:
+        matrix['delta_price_shifted_'+str(i)]=(matrix['date_item_id_price_avg_shifted_'+str(i)]-matrix['item_id_price_avg'])/matrix['item_id_price_avg']
+
+    features_to_drop = ["item_id_price_avg", "date_item_id_price_avg"]
+
+    matrix.drop(features_to_drop, axis = 1, inplace = True)
+
+    X_train = matrix[matrix.date_block_num <= 33].drop(['item_cnt_month'], axis=1).values
+    Y_train = matrix[matrix.date_block_num <= 33]['item_cnt_month']
+    X_test = matrix[matrix.date_block_num == 34].drop(['item_cnt_month'], axis=1).values
+    Y_train = Y_train.clip(0, 20)
+
+    return jnp.array(X_train), jnp.array(Y_train), jnp.array(X_test), test
 
 
-    return jnp.array(trainX), jnp.array(trainY), jnp.array(test_pr), test_data
-    
-    
 def get_generator_parallel(x, y, rng_key, batch_size, num_devices):
     def batch_generator():
         n = x.shape[0]
@@ -275,7 +323,7 @@ def main():
 
     print("Num devices :::: ", num_devices)
 
-    x, y, x_test, test_ds = load()
+    x, y, x_test, test_ds = load_dataset()
 
     print("Examples :::: ", x.shape)
     print("Examples :::: ", y.shape)
@@ -307,11 +355,11 @@ def main():
 
     params_multi_device = params
     opt_state_multi_device = opt_state
-    num_steps_replicated = replicate_tree(num_steps, num_devices)
+    num_steps_replicated = num_steps
     rng_replicated = rng
     state_multi_device = state
 
-    fn_update = jax.pmap(updater.update, axis_name='j', in_axes=(0, None, None, None, None, 0, 0), out_axes=(0, None, None, None, None, 0))
+    fn_update = jax.pmap(updater.update, axis_name='j', in_axes=(None, None, None, None, None, 0, 0), out_axes=(None, None, None, None, None, 0))
 
     logging.info('Starting train loop ++++++++...')
     for i, (w, z) in zip(range(max_steps), train_dataset):
@@ -337,15 +385,14 @@ def main():
             print('Computing ', i * 100)
         (rng,) = jr.split(rng, 1)
         a, b = i * 100, (i + 1) * 100
-        eli = x_test[a:b, :, :]
+        eli = x_test[a:b, :, None]
         fa, _ = forward_apply(params_reduced, state_reduced, rng,  eli, is_training=False)
         result = result.at[a:b].set(fa[:, 0, 0])
 
     result = np.array(result)
 
-    test_ds['item_cnt_month'] = result.reshape(y.shape[0]).clip(0, 20)
-    test_ds[['ID', 'item_cnt_month']].to_csv('./data/submission.csv', index=False)
-
+    output = pd.DataFrame({'ID': test_ds.index, 'item_cnt_month': result})
+    output.to_csv('submission1.csv', index=False)
 
 if __name__ == "__main__":
     logging.getLogger().setLevel(logging.INFO)
