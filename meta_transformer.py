@@ -18,6 +18,8 @@ import pandas as pd
 import datetime as dt
 from itertools import product
 
+from sklearn.preprocessing import LabelEncoder
+
 def layer_norm(x: jnp.ndarray, name: Optional[str] = None) -> jnp.ndarray:
     return hk.LayerNorm(axis=-1, create_scale=True, create_offset=True, eps=1e-6, name=name)(x)
 
@@ -165,6 +167,68 @@ class GradientUpdater:
         return num_steps + 1, new_rng, params, state, opt_state, metrics
 
 
+def cleanup(cats, shops, items):
+    cats['type']=cats['item_category_name'].apply(lambda x: x.split(' ')[0]).astype(str)
+    categ=[]
+    for cat in cats.type.unique():
+        if len(cats[cats.type==cat])>=5:
+            categ.append(cat)
+    cats.type=cats.type.apply(lambda x: x if (x in categ) else 'others')
+    cats['type_code']=LabelEncoder().fit_transform(cats['type'])
+    cats['split']=cats['item_category_name'].apply(lambda x: x.split('-'))
+    cats['sub_type']=cats['split'].apply(lambda x: x[1].strip() if len(x)>1 else x[0].strip())
+    cats['sub_type_code']=LabelEncoder().fit_transform(cats.sub_type)
+    cats=cats[['item_category_id','type_code','sub_type_code']]
+    import re
+    def name_correction(x):
+        x = x.lower() # all letters lower case
+        x = x.partition('[')[0] # partition by square brackets
+        x = x.partition('(')[0] # partition by curly brackets
+        x = re.sub('[^A-Za-z0-9А-Яа-я]+', ' ', x) # remove special characters
+        x = x.replace('  ', ' ') # replace double spaces with single spaces
+        x = x.strip() # remove leading and trailing white space
+        return x
+    items["name1"], items["name2"] = items['item_name'].str.split("[", 1).str
+    items["name1"], items["name3"] = items['item_name'].str.split("(", 1).str
+
+    items["name2"] = items['name2'].str.replace('[^A-Za-z0-9А-Яа-я]+', " ").str.lower()
+    items["name3"] = items['name3'].str.replace('[^A-Za-z0-9А-Яа-я]+', " ").str.lower()
+    items = items.fillna('0')
+    items["item_name"] = items["item_name"].apply(lambda x: name_correction(x))
+    items["type"] = items['name2'].apply(lambda x: x[0:8] if x.split(" ")[0] == "xbox" else x.split(" ")[0] )
+    items.loc[(items.type == "x360") | (items.type == "xbox360") | (items.type == "xbox 360") ,"type"] = "xbox 360"
+    items.loc[ items.type == "", "type"] = "mac"
+    items.type = items.type.apply( lambda x: x.replace(" ", "") )
+    items.loc[ (items.type == 'pc' )| (items.type == 'pс') | (items.type == "pc"), "type" ] = "pc"
+    items.loc[ items.type == 'рs3' , "type"] = "ps3"
+    group_sum = items.groupby(["type"]).agg({"item_id": "count"})
+    group_sum = group_sum.reset_index()
+    drop_cols = []
+    for cat in group_sum.type.unique():
+        if group_sum.loc[(group_sum.type == cat), "item_id"].values[0] <40:
+            drop_cols.append(cat)
+    items.name2 = items.name2.apply( lambda x: "other" if (x in drop_cols) else x )
+    items = items.drop(["type"], axis = 1)
+    items.name2 = LabelEncoder().fit_transform(items.name2)
+    items.name3 = LabelEncoder().fit_transform(items.name3)
+    items.drop(["item_name", "name1"],axis = 1, inplace= True)
+
+    shops['city']=shops['shop_name'].str.split(" ").map(lambda x:x[0])
+    shops['category']=shops['shop_name'].str.split(" ").map(lambda x:x[1])
+
+    category=[]
+    for cat in shops['category'].unique():
+        if len(shops[shops['category']==cat])>=5:
+            category.append(cat)
+    shops['category']=shops['category'].apply(lambda x: x if (x in category) else 'others')
+    shops['category']=LabelEncoder().fit_transform(shops.category)
+    shops['city']=LabelEncoder().fit_transform(shops.city)
+    shops=shops[['shop_id','city','category']]
+
+
+    return cats, shops, items
+    
+
 def load_dataset(filename='./data/sales_train.csv', filename1='./data/test.csv',
         filename2='./data/shops.csv', filename3='./data/items.csv', filename4='./data/item_categories.csv'):
     train = pd.read_csv(filename)
@@ -173,6 +237,8 @@ def load_dataset(filename='./data/sales_train.csv', filename1='./data/test.csv',
     shops = pd.read_csv(filename2)
     items = pd.read_csv(filename3)
     cats = pd.read_csv(filename4)
+
+    cats, shops, items = cleanup(cats, shops, items)
 
     matrix = []
     cols = ["date_block_num", "shop_id", "item_id"]
@@ -205,13 +271,13 @@ def load_dataset(filename='./data/sales_train.csv', filename1='./data/test.csv',
     matrix=pd.merge(matrix,items,on='item_id',how='left')
     matrix=pd.merge(matrix,cats,on='item_category_id',how='left')
 
-    matrix["city"] = matrix["city"].astype(np.int8)
-    matrix["category"] = matrix["category"].astype(np.int8)
-    matrix["item_category_id"] = matrix["item_category_id"].astype(np.int8)
-    matrix["sub_type_code"] = matrix["sub_type_code"].astype(np.int8)
-    matrix["name2"] = matrix["name2"].astype(np.int8)
-    matrix["name3"] = matrix["name3"].astype(np.int16)
-    matrix["type_code"] = matrix["type_code"].astype(np.int8)
+    matrix["city"] = matrix["city"].astype(int)
+    matrix["category"] = matrix["category"].astype(int)
+    matrix["item_category_id"] = matrix["item_category_id"].astype(int)
+    matrix["sub_type_code"] = matrix["sub_type_code"].astype(int)
+    matrix["name2"] = matrix["name2"].astype(int)
+    matrix["name3"] = matrix["name3"].astype(int)
+    matrix["type_code"] = matrix["type_code"].astype(int)
 
     def lag_feature(df,lags,cols ):
         for col in cols:
