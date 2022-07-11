@@ -19,6 +19,8 @@ import datetime as dt
 from itertools import product
 
 from sklearn.preprocessing import LabelEncoder
+from sklearn.preprocessing import StandardScaler
+
 
 def layer_norm(x: jnp.ndarray, name: Optional[str] = None) -> jnp.ndarray:
     return hk.LayerNorm(axis=-1, create_scale=True, create_offset=True, eps=1e-6, name=name)(x)
@@ -166,201 +168,27 @@ class GradientUpdater:
 
         return num_steps + 1, new_rng, params, state, opt_state, metrics
 
+def load_dataset(f1='./data/sales_train.csv', f2='./data/test.csv'):
+    train_ds = pd.read_csv(f1)
+    test_ds = pd.read_csv(f2)
+    monthly_data = train_ds.pivot_table(index = ['shop_id','item_id'], values = ['item_cnt_day'], columns = ['date_block_num'], fill_value = 0, aggfunc='sum')
+    monthly_data.reset_index(inplace = True)
+    train_data = monthly_data.drop(columns= ['shop_id','item_id'], level=0)
+    train_data.fillna(0,inplace = True)
+    x_train = np.expand_dims(train_data.values[:,:-1],axis = 2)
+    y_train = train_data.values[:,-1:].clip(0, 20)
 
-def cleanup(cats, shops, items):
-    cats['type']=cats['item_category_name'].apply(lambda x: x.split(' ')[0]).astype(str)
-    categ=[]
-    for cat in cats.type.unique():
-        if len(cats[cats.type==cat])>=5:
-            categ.append(cat)
-    cats.type=cats.type.apply(lambda x: x if (x in categ) else 'others')
-    cats['type_code']=LabelEncoder().fit_transform(cats['type'])
-    cats['split']=cats['item_category_name'].apply(lambda x: x.split('-'))
-    cats['sub_type']=cats['split'].apply(lambda x: x[1].strip() if len(x)>1 else x[0].strip())
-    cats['sub_type_code']=LabelEncoder().fit_transform(cats.sub_type)
-    cats=cats[['item_category_id','type_code','sub_type_code']]
-    import re
-    def name_correction(x):
-        x = x.lower() # all letters lower case
-        x = x.partition('[')[0] # partition by square brackets
-        x = x.partition('(')[0] # partition by curly brackets
-        x = re.sub('[^A-Za-z0-9А-Яа-я]+', ' ', x) # remove special characters
-        x = x.replace('  ', ' ') # replace double spaces with single spaces
-        x = x.strip() # remove leading and trailing white space
-        return x
-    items["name1"], items["name2"] = items['item_name'].str.split("[", 1).str
-    items["name1"], items["name3"] = items['item_name'].str.split("(", 1).str
+    sc = StandardScaler()
+    x_train = sc.fit_transform(x_train)
 
-    items["name2"] = items['name2'].str.replace('[^A-Za-z0-9А-Яа-я]+', " ").str.lower()
-    items["name3"] = items['name3'].str.replace('[^A-Za-z0-9А-Яа-я]+', " ").str.lower()
-    items = items.fillna('0')
-    items["item_name"] = items["item_name"].apply(lambda x: name_correction(x))
-    items["type"] = items['name2'].apply(lambda x: x[0:8] if x.split(" ")[0] == "xbox" else x.split(" ")[0] )
-    items.loc[(items.type == "x360") | (items.type == "xbox360") | (items.type == "xbox 360") ,"type"] = "xbox 360"
-    items.loc[ items.type == "", "type"] = "mac"
-    items.type = items.type.apply( lambda x: x.replace(" ", "") )
-    items.loc[ (items.type == 'pc' )| (items.type == 'pс') | (items.type == "pc"), "type" ] = "pc"
-    items.loc[ items.type == 'рs3' , "type"] = "ps3"
-    group_sum = items.groupby(["type"]).agg({"item_id": "count"})
-    group_sum = group_sum.reset_index()
-    drop_cols = []
-    for cat in group_sum.type.unique():
-        if group_sum.loc[(group_sum.type == cat), "item_id"].values[0] <40:
-            drop_cols.append(cat)
-    items.name2 = items.name2.apply( lambda x: "other" if (x in drop_cols) else x )
-    items = items.drop(["type"], axis = 1)
-    items.name2 = LabelEncoder().fit_transform(items.name2)
-    items.name3 = LabelEncoder().fit_transform(items.name3)
-    items.drop(["item_name", "name1"],axis = 1, inplace= True)
+    test_rows = monthly_data.merge(test_ds, on = ['item_id','shop_id'], how = 'right')
+    x_test = test_rows.drop(test_rows.columns[:5], axis=1).drop('ID', axis=1)
+    x_test.fillna(0,inplace = True)
+    x_test = np.expand_dims(x_test,axis = 2)
 
-    shops['city']=shops['shop_name'].str.split(" ").map(lambda x:x[0])
-    shops['category']=shops['shop_name'].str.split(" ").map(lambda x:x[1])
+    x_test = sc.transform(x_test)
 
-    category=[]
-    for cat in shops['category'].unique():
-        if len(shops[shops['category']==cat])>=5:
-            category.append(cat)
-    shops['category']=shops['category'].apply(lambda x: x if (x in category) else 'others')
-    shops['category']=LabelEncoder().fit_transform(shops.category)
-    shops['city']=LabelEncoder().fit_transform(shops.city)
-    shops=shops[['shop_id','city','category']]
-
-
-    return cats, shops, items
-    
-
-def load_dataset(filename='./data/sales_train.csv', filename1='./data/test.csv',
-        filename2='./data/shops.csv', filename3='./data/items.csv', filename4='./data/item_categories.csv'):
-    train = pd.read_csv(filename)
-    test = pd.read_csv(filename1)
-
-    shops = pd.read_csv(filename2)
-    items = pd.read_csv(filename3)
-    cats = pd.read_csv(filename4)
-
-    cats, shops, items = cleanup(cats, shops, items)
-
-    matrix = []
-    cols = ["date_block_num", "shop_id", "item_id"]
-    for i in range(34):
-        sales = train[train.date_block_num == i]
-        matrix.append(np.array(list(product( [i], sales.shop_id.unique(), sales.item_id.unique()))))
-    matrix = pd.DataFrame(np.vstack(matrix), columns=cols)
-    matrix['date_block_num']=matrix['date_block_num'].astype(int)
-    matrix['shop_id']=matrix['shop_id'].astype(int)
-    matrix['item_id']=matrix['item_id'].astype(int)
-    matrix.sort_values(cols,inplace=True)
-
-    train['revenue']=train['item_cnt_day']*train['item_price']
-
-    group=train.groupby(cols).agg({'item_cnt_day':['sum']})
-    group.columns=['item_cnt_month']
-    group.reset_index(inplace=True)
-    matrix=pd.merge(matrix,group,on=cols,how='left')
-    matrix['item_cnt_month']=matrix['item_cnt_month'].fillna(0).astype(np.float32)
-
-    test['date_block_num']=34
-    test["date_block_num"] = test["date_block_num"].astype(int)
-    test['shop_id']=test['shop_id'].astype(int)
-    test['item_id']=test['item_id'].astype(int)
-    test.drop('ID',inplace=True,axis=1)
-    matrix=pd.concat([matrix,test],ignore_index=True,sort=False,keys=cols)
-    matrix.fillna(0,inplace=True)    
-
-    matrix=pd.merge(matrix,shops,on=['shop_id'],how='left')
-    matrix=pd.merge(matrix,items,on='item_id',how='left')
-    matrix=pd.merge(matrix,cats,on='item_category_id',how='left')
-
-    matrix["city"] = matrix["city"].astype(int)
-    matrix["category"] = matrix["category"].astype(int)
-    matrix["item_category_id"] = matrix["item_category_id"].astype(int)
-    matrix["sub_type_code"] = matrix["sub_type_code"].astype(int)
-    matrix["name2"] = matrix["name2"].astype(int)
-    matrix["name3"] = matrix["name3"].astype(int)
-    matrix["type_code"] = matrix["type_code"].astype(int)
-
-    def lag_feature(df,lags,cols ):
-        for col in cols:
-            print('Adding lag feature in ',col)
-            tmp=df[['date_block_num','shop_id','item_id',col]]
-            for i in lags:
-                shifted=tmp.copy()
-                shifted.columns=['date_block_num','shop_id','item_id',col+'_shifted_'+str(i)]
-                shifted.date_block_num=shifted.date_block_num+i
-                df=pd.merge(df,shifted,on=['date_block_num','shop_id','item_id'],how='left')
-        return df
-
-    matrix=lag_feature(matrix,[1,2,3],["item_cnt_month"])
-
-    group=matrix.groupby(['date_block_num','item_category_id']).agg({'item_cnt_month':['mean']})
-    group.columns=['date_item_cat_avg']
-    group.reset_index(inplace=True)
-    matrix=pd.merge(matrix,group,on=['date_block_num','item_category_id'],how='left')
-    matrix['date_item_cat_avg']=matrix['date_item_cat_avg'].astype(np.float32)
-    matrix=lag_feature(matrix,[1,2],['date_item_cat_avg'])
-    matrix.drop(['date_item_cat_avg'],axis=1,inplace=True)
-
-    group=matrix.groupby(['date_block_num','category']).agg({'item_cnt_month':['mean']})
-    group.columns=['date_cat_avg']
-    group.reset_index(inplace=True)
-
-    matrix=pd.merge(matrix,group,on=['date_block_num','category'],how='left')
-    matrix['date_cat_avg']=matrix['date_cat_avg'].astype(np.float32)
-
-    matrix=lag_feature(matrix,[1,2],['date_cat_avg'])
-    matrix.drop(['date_cat_avg'],axis=1,inplace=True)
-
-    group=matrix.groupby(['date_block_num']).agg({'item_cnt_month':['mean']})
-    group.columns=['date_avg_item_cnt']
-    group.reset_index(inplace=True)
-
-    matrix=pd.merge(matrix,group,on='date_block_num',how='left')
-    matrix.date_avg_item_cnt = matrix["date_avg_item_cnt"].astype(np.float32)
-    matrix=lag_feature(matrix,[1,2],["date_avg_item_cnt"])
-    matrix.drop(['date_avg_item_cnt'],inplace=True,axis=1)
-
-    group=matrix.groupby(['date_block_num','item_id']).agg({'item_cnt_month':['mean']})
-    group.columns=['date_item_avg_item_cnt']
-    group.reset_index(inplace=True)
-
-    matrix=pd.merge(matrix,group,on=['date_block_num','item_id'],how='left')
-    matrix.date_item_avg_item_cnt=matrix['date_item_avg_item_cnt'].astype(np.float32)
-    matrix=lag_feature(matrix,[1,2,3],['date_item_avg_item_cnt'])
-    matrix.drop(['date_item_avg_item_cnt'],inplace=True,axis=1)
-
-    group=train.groupby(['item_id']).agg({'item_price':['mean']})
-    group.columns=['item_id_price_avg']
-    group.reset_index(inplace=True)
-
-    matrix=pd.merge(matrix,group,on=['item_id'],how='left')
-    matrix['item_id_price_avg']=matrix['item_id_price_avg'].astype(np.float32)
-
-    group=train.groupby(['date_block_num','item_id']).agg({'item_price':['mean']})
-    group.columns=['date_item_id_price_avg']
-    group.reset_index(inplace=True)
-
-    matrix=pd.merge(matrix,group,on=['date_block_num','item_id'],how='left')
-    matrix['date_item_id_price_avg']=matrix['date_item_id_price_avg'].astype(np.float32)
-
-    matrix=lag_feature(matrix,[1,2,3],['date_item_id_price_avg'])
-
-    for i in [1,2,3]:
-        matrix['delta_price_shifted_'+str(i)]=(matrix['date_item_id_price_avg_shifted_'+str(i)]-matrix['item_id_price_avg'])/matrix['item_id_price_avg']
-
-    features_to_drop = ["item_id_price_avg", "date_item_id_price_avg"]
-
-    matrix.drop(features_to_drop, axis = 1, inplace = True)
-
-    X_train = matrix[matrix.date_block_num <= 33].drop(['item_cnt_month'], axis=1).values
-    Y_train = matrix[matrix.date_block_num <= 33]['item_cnt_month']
-    X_test = matrix[matrix.date_block_num == 34].drop(['item_cnt_month'], axis=1).values
-    Y_train = Y_train.clip(0, 20)
-
-    X_train = np.expand_dims(X_train, axis=2)
-    Y_train = np.expand_dims(Y_train, axis=1)
-
-    return jnp.array(X_train), jnp.array(Y_train), jnp.array(X_test), test
-
+    return jnp.array(x_train), jnp.array(y_train), jnp.array(x_test), test_ds
 
 def get_generator_parallel(x, y, rng_key, batch_size, num_devices):
     def batch_generator():
@@ -454,13 +282,13 @@ def main():
             print('Computing ', i * 100)
         (rng,) = jr.split(rng, 1)
         a, b = i * 100, (i + 1) * 100
-        eli = x_test[a:b, :, None]
+        eli = x_test[a:b, :, :]
         fa, _ = forward_apply(params_reduced, state_reduced, rng,  eli, is_training=False)
         result = result.at[a:b].set(fa[:, 0, 0])
 
     result = np.array(result)
 
-    output = pd.DataFrame({'ID': test_ds.index, 'item_cnt_month': result})
+    output = pd.DataFrame({'ID': test_ds['ID'], 'item_cnt_month': result.ravel()})
     output.to_csv('submission1.csv', index=False)
 
 if __name__ == "__main__":
