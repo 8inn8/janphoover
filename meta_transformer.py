@@ -175,18 +175,18 @@ def load_dataset(f1='./data/sales_train.csv', f2='./data/test.csv'):
     monthly_data.reset_index(inplace = True)
     train_data = monthly_data.drop(columns= ['shop_id','item_id'], level=0)
     train_data.fillna(0,inplace = True)
-    x_train = np.expand_dims(train_data.values[:,:-1],axis = 2)
+
     y_train = train_data.values[:,-1:].clip(0, 20)
 
     sc = StandardScaler()
-    x_train = sc.fit_transform(x_train)
+    x_train = np.expand_dims(sc.fit_transform(train_data.values[:,:-1]), axis=2)
 
     test_rows = monthly_data.merge(test_ds, on = ['item_id','shop_id'], how = 'right')
     x_test = test_rows.drop(test_rows.columns[:5], axis=1).drop('ID', axis=1)
     x_test.fillna(0,inplace = True)
-    x_test = np.expand_dims(x_test,axis = 2)
 
     x_test = sc.transform(x_test)
+    x_test = np.expand_dims(x_test,axis = 2)
 
     return jnp.array(x_train), jnp.array(y_train), jnp.array(x_test), test_ds
 
