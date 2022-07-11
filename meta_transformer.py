@@ -356,6 +356,9 @@ def load_dataset(filename='./data/sales_train.csv', filename1='./data/test.csv',
     X_test = matrix[matrix.date_block_num == 34].drop(['item_cnt_month'], axis=1).values
     Y_train = Y_train.clip(0, 20)
 
+    X_train = np.expand_dims(X_train, axis=2)
+    Y_train = np.expand_dims(Y_train, axis=1)
+
     return jnp.array(X_train), jnp.array(Y_train), jnp.array(X_test), test
 
 
@@ -375,15 +378,15 @@ def replicate_tree(t, num_devices):
     return jax.tree_map(lambda x: jnp.array([x] * num_devices), t)
 
 def main():
-    max_steps = 2300
+    max_steps = 200000
     num_heads = 8
     head_size = 128
     num_layers = 2
     dropout_rate = 0.4
     grad_clip_value = 1.0
-    learning_rate = 0.0001
-    time2vec_dim = 1
-    batch_size = 128
+    learning_rate = 0.001
+    time2vec_dim = 3
+    batch_size = 256
     
     num_devices = jax.local_device_count()
 
