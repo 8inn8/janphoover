@@ -117,7 +117,11 @@ class TransformerThunk(hk.Module):
         for i in range(self.num_layers):
             x = AttentionBlock(num_heads=self.num_heads, head_size=self.head_size, ff_dim=self.ff_dim, dropout=self.dropout)(x, is_training)
         x = jnp.mean(x, axis=-1)
-        x = hk.Linear(256, w_init=w_init, b_init=hki.Constant(1e-6))(x)
+        x = hk.Linear(128, w_init=w_init, b_init=hki.Constant(1e-6))(x)
+        x = jnn.gelu(x, approximate=True)
+        x = hk.Linear(64, w_init=w_init, b_init=hki.Constant(1e-6))(x)
+        x = jnn.gelu(x, approximate=True)
+        x = hk.Linear(32, w_init=w_init, b_init=hki.Constant(1e-6))(x)
         x = jnn.gelu(x, approximate=True)
         x = hk.dropout(hk.next_rng_key(), dropout, x)
         x = jnn.gelu(hk.Linear(1, w_init=w_init, b_init=hki.Constant(1e-6))(x), approximate=True)
@@ -210,11 +214,11 @@ def main():
     max_steps = 2400
     num_heads = 8
     head_size = 128
-    num_layers = 2
+    num_layers = 1
     dropout_rate = 0.4
     grad_clip_value = 1.0
-    learning_rate = 0.01
-    time2vec_dim = 3
+    learning_rate = 0.005
+    time2vec_dim = 7
     batch_size = 256
     
     num_devices = jax.local_device_count()
