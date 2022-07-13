@@ -116,8 +116,8 @@ class TransformerThunk(hk.Module):
         w_init = hki.VarianceScaling(2.0, mode='fan_in', distribution='truncated_normal')
         for i in range(self.num_layers):
             x = AttentionBlock(num_heads=self.num_heads, head_size=self.head_size, ff_dim=self.ff_dim, dropout=self.dropout)(x, is_training)
-        #x = jnp.mean(x, axis=-1)
-        x = einops.rearrange(x, 'b h c -> b (h c)')
+        x = jnp.mean(x, axis=-1)
+        #x = einops.rearrange(x, 'b h c -> b (h c)')
         x = hk.Linear(256, w_init=w_init, b_init=hki.Constant(1e-6))(x)
         x = jnn.gelu(x, approximate=True)
         x = hk.Linear(128, w_init=w_init, b_init=hki.Constant(1e-6))(x)
@@ -214,15 +214,15 @@ def replicate_tree(t, num_devices):
     return jax.tree_map(lambda x: jnp.array([x] * num_devices), t)
 
 def main():
-    max_steps = 2400
-    num_heads = 8
+    max_steps = 800
+    num_heads = 2
     head_size = 128
-    num_layers = 1
+    num_layers = 2
     dropout_rate = 0.4
     grad_clip_value = 1.0
-    learning_rate = 0.01
+    learning_rate = 0.005
     time2vec_dim = 7
-    batch_size = 256
+    batch_size = 512
     
     num_devices = jax.local_device_count()
 
@@ -245,7 +245,7 @@ def main():
     loss_fn = ft.partial(lm_loss_fn, forward_apply)
 
 
-    scheduler = optax.exponential_decay(init_value=learning_rate, transition_steps=1000, decay_rate=0.99)
+    scheduler = optax.exponential_decay(init_value=learning_rate, transition_steps=4000, decay_rate=0.99)
 
     optimizer = optax.chain(
         optax.adaptive_grad_clip(grad_clip_value),
