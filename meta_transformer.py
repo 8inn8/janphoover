@@ -116,7 +116,8 @@ class TransformerThunk(hk.Module):
         w_init = hki.VarianceScaling(2.0, mode='fan_in', distribution='truncated_normal')
         for i in range(self.num_layers):
             x = AttentionBlock(num_heads=self.num_heads, head_size=self.head_size, ff_dim=self.ff_dim, dropout=self.dropout)(x, is_training)
-        x = einops.rearrange(x, 'b c h -> b (c h)')
+        #x = jnp.mean(x, axis=-1)
+        x = einops.rearrange(x, 'b h c -> b (h c)')
         x = hk.Linear(256, w_init=w_init, b_init=hki.Constant(1e-6))(x)
         x = jnn.gelu(x, approximate=True)
         x = hk.Linear(128, w_init=w_init, b_init=hki.Constant(1e-6))(x)
@@ -138,8 +139,9 @@ def build_forward_fn(num_layers, time2vec_dim, num_heads, head_size, ff_dim=None
 @ft.partial(jax.jit, static_argnums=(0, 6))
 def lm_loss_fn(forward_fn, params, state, rng, x, y, is_training: bool = True) -> jnp.ndarray:
     y_pred, state = forward_fn(params, state, rng, x, is_training)
-    l2_loss = 0.01 * sum(np.sum(jnp.square(p)) for p in jax.tree_util.tree_leaves(params))
-    return jnp.sqrt(jnp.mean(((y_pred -y) ** 2))) + l2_loss, state
+
+    l2_loss = 0.5 * sum(jnp.sum(jnp.square(p)) for p in jax.tree_util.tree_leaves(params))
+    return jnp.sqrt(jnp.mean((jnp.square(y - y_pred)))) + 1e-4 * l2_loss, state
 
 
 class GradientUpdater:
@@ -215,10 +217,10 @@ def main():
     max_steps = 2400
     num_heads = 8
     head_size = 128
-    num_layers = 2
+    num_layers = 1
     dropout_rate = 0.4
     grad_clip_value = 1.0
-    learning_rate = 0.005
+    learning_rate = 0.01
     time2vec_dim = 7
     batch_size = 256
     
@@ -242,12 +244,13 @@ def main():
     forward_apply = forward_fn.apply
     loss_fn = ft.partial(lm_loss_fn, forward_apply)
 
-    scheduler = optax.exponential_decay(init_value=learning_rate, transition_steps=1000,decay_rate=0.99)
+
+    scheduler = optax.exponential_decay(init_value=learning_rate, transition_steps=1000, decay_rate=0.99)
 
     optimizer = optax.chain(
         optax.adaptive_grad_clip(grad_clip_value),
         #optax.sgd(learning_rate=learning_rate, momentum=0.95, nesterov=True),
-        optax.scale_by_radam(eps_root=1e-8, threshold=5),
+        optax.scale_by_radam(),
         optax.scale_by_schedule(scheduler),
         optax.scale(-1.0)
     )
