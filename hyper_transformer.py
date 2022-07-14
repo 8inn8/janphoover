@@ -50,6 +50,7 @@ def create_look_ahead_mask(size):
 
 class TransformerLayer(hk.Module):
     def __init__(self, num_heads, head_size, hidden_size, dropout_rate):
+        super(TransformerLayer, self).__init__()
         self.dropout = dropout_rate
         self.head_size = head_size
         self.num_heads = num_heads
@@ -73,6 +74,7 @@ class TransformerLayer(hk.Module):
 
 class HyperTransformer(hk.Module):
     def __init__(self, num_layers, num_heads, head_size, hidden_size, inp_features, out_features, dropout_rate):
+        super(HyperTransformer, self).__init__()
         self.num_layers = num_layers
         self.num_heads = num_heads
         self.head_size = head_size
