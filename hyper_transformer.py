@@ -30,17 +30,19 @@ def get_angles(pos, i, D):
     angle_rates = 1 / jnp.power(10000, (2* (i // 2)) / jnp.float32(D))
     return pos * angle_rates
 
-def positional_encoding(D, position=20, dim=3):
+def positional_encoding(D, position=33, dim=3):
     angle_rads = get_angles(jnp.arange(position)[:, jnp.newaxis], jnp.arange(D)[jnp.newaxis, :], D)
 
     angle_rads = angle_rads.at[:, 0::2].set(jnp.sin(angle_rads[:, 0::2]))
     angle_rads = angle_rads.at[:, 1::2].set(jnp.cos(angle_rads[:, 1::2]))
 
+    if dim == 2:
+        pos_encoding = angle_rads
     if dim == 3:
         pos_encoding = angle_rads[jnp.newaxis, ...]
     elif dim == 4:
         pos_encoding = angle_rads[jnp.newaxis, jnp.newaxis, ...]
-    return 
+    return pos_encoding
     
 
 def create_look_ahead_mask(size):
@@ -57,7 +59,7 @@ class TransformerLayer(hk.Module):
         self.hidden_size = hidden_size
 
 
-    def __call__(self, x, mask, is_training):
+    def __call__(self, x, mask, is_training=True):
         dropout = self.dropout if is_training else 0.0
         attn, _ = hk.MultiHeadAttention(num_heads=self.num_heads, key_size=self.head_size, w_init_scale=1.0)(x, x, x, mask)
         attn = hk.dropout(hk.next_rng_key(), dropout, attn)
@@ -85,7 +87,7 @@ class HyperTransformer(hk.Module):
         self.sqrt_D = jnp.array(jnp.sqrt(head_size))
         self.pe = positional_encoding(head_size)
 
-    def __call__(self, x, mask, is_training):
+    def __call__(self, x, mask, is_training=True):
         B, S, D = x.shape
         dropout = self.dropout_rate if is_training else 0.0
 
@@ -105,7 +107,9 @@ class HyperTransformer(hk.Module):
 def build_forward_fn(num_layers, hidden_dim, num_heads, head_size, inp_features=32, out_features=32, dropout=0.5):
     def forward_fn(x: jnp.ndarray, is_training: bool = True) -> jnp.ndarray:
         tr = HyperTransformer(num_layers, num_heads, head_size, hidden_dim, inp_features, out_features, dropout)
-        return tr(x, is_training)
+        S = x.shape[1]
+        mask = create_look_ahead_mask(S)
+        return tr(x, mask, is_training)
 
     return forward_fn
         
