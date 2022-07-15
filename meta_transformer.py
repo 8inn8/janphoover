@@ -60,17 +60,17 @@ class AttentionBlock(hk.Module):
         out_features = inputs.shape[-1]
 
         x = hk.MultiHeadAttention(num_heads=self.num_heads, key_size=self.head_size, w_init_scale=1.0)(inputs, inputs, inputs)
-        x = hk.BatchNorm(False, False, decay_rate=0.9, eps=1e-6)(x, is_training)
+        x = hk.BatchNorm(False, False, decay_rate=0.99, eps=1e-6)(x, is_training)
         x = hk.dropout(hk.next_rng_key(), dropout, x)
         x = layer_norm(x)
 
         x = hk.Conv1D(output_channels=self.ff_dim, kernel_shape=1, padding="same")(x)
-        x = hk.BatchNorm(False, False, decay_rate=0.9, eps=1e-6)(x, is_training)
-        x = jnn.gelu(x, approximate=True)
+        x = hk.BatchNorm(False, False, decay_rate=0.99, eps=1e-6)(x, is_training)
+        x = jnn.gelu(x, approximate=False)
         x = hk.Conv1D(output_channels=out_features, kernel_shape=1, padding="same")(x)
-        x = hk.BatchNorm(False, False, decay_rate=0.9, eps=1e-6)(x, is_training)
+        x = hk.BatchNorm(False, False, decay_rate=0.99, eps=1e-6)(x, is_training)
         x = hk.dropout(hk.next_rng_key(), dropout, x)
-        x = jnn.gelu(x, approximate=True)
+        x = jnn.gelu(x, approximate=False)
 
         return layer_norm(x + inputs)
 
@@ -119,14 +119,13 @@ class TransformerThunk(hk.Module):
         x = jnp.mean(x, axis=-1)
         #x = einops.rearrange(x, 'b h c -> b (h c)')
         x = hk.Linear(256, w_init=w_init, b_init=hki.Constant(1e-6))(x)
-        x = jnn.gelu(x, approximate=True)
+        x = jnn.gelu(x, approximate=False)
         x = hk.Linear(128, w_init=w_init, b_init=hki.Constant(1e-6))(x)
-        x = jnn.gelu(x, approximate=True)
+        x = jnn.gelu(x, approximate=False)
         x = hk.Linear(64, w_init=w_init, b_init=hki.Constant(1e-6))(x)
-        x = jnn.gelu(x, approximate=True)
+        x = jnn.gelu(x, approximate=False)
         x = hk.dropout(hk.next_rng_key(), dropout, x)
-        x = jnn.gelu(hk.Linear(1, w_init=w_init, b_init=hki.Constant(1e-6))(x), approximate=True)
-        return x
+        return hk.Linear(1, w_init=w_init, b_init=hki.Constant(1e-6))(x)
 
 def build_forward_fn(num_layers, time2vec_dim, num_heads, head_size, ff_dim=None, dropout=0.5):
     def forward_fn(x: jnp.ndarray, is_training: bool = True) -> jnp.ndarray:
@@ -141,7 +140,7 @@ def lm_loss_fn(forward_fn, params, state, rng, x, y, is_training: bool = True) -
     y_pred, state = forward_fn(params, state, rng, x, is_training)
 
     l2_loss = 0.5 * sum(jnp.sum(jnp.square(p)) for p in jax.tree_util.tree_leaves(params))
-    return jnp.sqrt(jnp.mean((jnp.square(y - y_pred)))) + 1e-4 * l2_loss, state
+    return jnp.sqrt(jnp.mean((jnp.square(y - y_pred)))) + 1e-5 * l2_loss, state
 
 
 class GradientUpdater:
@@ -175,6 +174,29 @@ class GradientUpdater:
         }
 
         return num_steps + 1, new_rng, params, state, opt_state, metrics
+
+def load(f1='./data/sales_train.csv', f2='./data/test.csv'):
+    train = pd.read_csv(f1)
+    test = pd.read_csv(f2)
+    
+    trn = train.copy()
+    trn = trn.pivot_table(index = ['shop_id','item_id'],values = ['item_cnt_day'],columns = ['date_block_num'],fill_value = 0,aggfunc='sum') 
+
+    tst = test.copy()
+    tst = tst.pivot_table(index = ['shop_id','item_id'],fill_value = 0)
+
+    combo = pd.merge(tst, trn, how = 'left', on = ['shop_id','item_id']).fillna(0) #train test combined
+    combo = combo.drop(columns = ['ID'])
+
+    arrc = np.array(combo.values[:, :-1])
+    train_data = arrc.reshape(arrc.shape[0], arrc.shape[1], 1)
+    y = combo.values[:, -1:].clip(0, 50)
+
+    arrt = np.array(combo.values[:, 1:])
+    test_data = arrt.reshape(arrt.shape[0], arrt.shape[1], 1)
+
+    return jnp.array(train_data), jnp.array(y), jnp.array(test_data), test
+
 
 def load_dataset(f1='./data/sales_train.csv', f2='./data/test.csv'):
     train_ds = pd.read_csv(f1)
@@ -214,21 +236,21 @@ def replicate_tree(t, num_devices):
     return jax.tree_map(lambda x: jnp.array([x] * num_devices), t)
 
 def main():
-    max_steps = 800
-    num_heads = 2
+    max_steps = 10000
+    num_heads = 8
     head_size = 128
     num_layers = 2
-    dropout_rate = 0.4
+    dropout_rate = 0.2
     grad_clip_value = 1.0
-    learning_rate = 0.005
-    time2vec_dim = 7
-    batch_size = 512
+    learning_rate = 0.001
+    time2vec_dim = 15
+    batch_size = 256
     
     num_devices = jax.local_device_count()
 
     print("Num devices :::: ", num_devices)
 
-    x, y, x_test, test_ds = load_dataset()
+    x, y, x_test, test_ds = load()
 
     print("Examples :::: ", x.shape)
     print("Examples :::: ", y.shape)
@@ -250,7 +272,8 @@ def main():
     optimizer = optax.chain(
         optax.adaptive_grad_clip(grad_clip_value),
         #optax.sgd(learning_rate=learning_rate, momentum=0.95, nesterov=True),
-        optax.scale_by_radam(),
+        #optax.scale_by_radam(),
+        optax.scale_by_adam(),
         optax.scale_by_schedule(scheduler),
         optax.scale(-1.0)
     )
